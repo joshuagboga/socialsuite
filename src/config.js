@@ -17,3 +17,9 @@ export const ALLOW_SIGNUP = !/^(false|0|no|off)$/i.test(process.env.ALLOW_SIGNUP
 export const TRUST_PROXY = process.env.TRUST_PROXY !== undefined
   ? (/^\d+$/.test(process.env.TRUST_PROXY) ? Number(process.env.TRUST_PROXY) : /^(true|yes|on)$/i.test(process.env.TRUST_PROXY))
   : PUBLIC_URL.startsWith("https") ? 1 : false;
+
+// Some hosts put the visitor's real address in their own header, which is more reliable than
+// X-Forwarded-For (Fly.io: "fly-client-ip", Cloudflare: "cf-connecting-ip"). Only set this when
+// the app can be reached exclusively through that host's proxy, because the proxy is what
+// stops visitors from sending the header themselves.
+export const CLIENT_IP_HEADER = (process.env.CLIENT_IP_HEADER || "").trim().toLowerCase();

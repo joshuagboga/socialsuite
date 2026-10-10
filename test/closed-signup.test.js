@@ -28,3 +28,16 @@ test("the privacy policy is public and shows the operator's contact details", as
     await app.stop();
   }
 });
+
+test("CLIENT_IP_HEADER makes rate limits follow the address the host's proxy reports", async () => {
+  const app = await startServer({ env: { CLIENT_IP_HEADER: "Fly-Client-IP" } });
+  try {
+    const visitorA = { "Fly-Client-IP": "203.0.113.5" }, visitorB = { "Fly-Client-IP": "203.0.113.9" };
+    const c = client(app.url);
+    for (let i = 0; i < 5; i++) await c.post("/api/login", { email: "x@example.com", password: "wrong-pass" }, visitorA);
+    assert.equal((await c.post("/api/login", { email: "x@example.com", password: "wrong-pass" }, visitorA)).status, 429);
+    assert.equal((await c.post("/api/login", { email: "x@example.com", password: "wrong-pass" }, visitorB)).status, 401, "another visitor is not locked out");
+  } finally {
+    await app.stop();
+  }
+});
