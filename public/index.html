@@ -9,11 +9,18 @@
 </head>
 <body>
   <div id="login" class="login hidden">
-    <form class="login-card" id="login-form">
+    <form class="login-card" id="login-form" novalidate>
       <div class="brand big"><span class="logo"></span>SocialSuite</div>
-      <label>Password<input type="password" name="password" autofocus required /></label>
-      <button class="btn primary" type="submit">Sign in</button>
-      <p class="error" id="login-error"></p>
+      <p class="muted login-lead" id="login-lead">Sign in to your account</p>
+      <label id="name-field" class="hidden">Your name<input type="text" name="name" autocomplete="name" maxlength="80" /></label>
+      <label>Email<input type="email" name="email" autocomplete="email" required /></label>
+      <label>Password<input type="password" name="password" autocomplete="current-password" required />
+        <span class="help small muted hidden" id="password-help">At least 8 characters.</span></label>
+      <button class="btn primary" type="submit" id="login-submit">Sign in</button>
+      <p class="error" id="login-error" role="alert"></p>
+      <p class="muted small login-switch" id="login-switch">
+        <span id="switch-text">New here?</span> <button type="button" class="link inline" id="switch-mode">Create an account</button>
+      </p>
     </form>
   </div>
 
@@ -27,7 +34,10 @@
         <a href="#/accounts" data-route="accounts">Accounts</a>
         <a href="#/claude" data-route="claude">Claude connector</a>
       </nav>
-      <button class="link logout" id="logout">Sign out</button>
+      <div class="whoami">
+        <span class="small muted" id="whoami" title=""></span>
+        <button class="link" id="logout">Sign out</button>
+      </div>
     </aside>
     <main id="view" class="view"></main>
   </div>

@@ -11,7 +11,7 @@ async function api(path, { method = "GET", body, raw, headers } = {}) {
     body: raw ?? (body ? JSON.stringify(body) : undefined),
   });
   const data = await res.json().catch(() => ({}));
-  if (res.status === 401 && path !== "/api/login") { showLogin(); throw new Error("Please sign in"); }
+  if (res.status === 401 && path !== "/api/login") { showLogin(); throw new Error(data.error || "Please sign in"); }
   if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
   return data;
 }
@@ -66,19 +66,54 @@ async function loadBase() {
 
 // ---------------------------------------------------------------- auth
 
-function showLogin() {
+let authMode = "login"; // or "signup"
+let signupAllowed = true;
+
+function setAuthMode(mode) {
+  authMode = mode;
+  const signup = mode === "signup";
+  const form = $("#login-form");
+  $("#name-field").classList.toggle("hidden", !signup);
+  $("#password-help").classList.toggle("hidden", !signup);
+  form.password.autocomplete = signup ? "new-password" : "current-password";
+  $("#login-lead").textContent = signup ? "Create your account" : "Sign in to your account";
+  $("#login-submit").textContent = signup ? "Create account" : "Sign in";
+  $("#switch-text").textContent = signup ? "Already have an account?" : "New here?";
+  $("#switch-mode").textContent = signup ? "Sign in" : "Create an account";
+  $("#login-switch").classList.toggle("hidden", !signup && !signupAllowed);
+  $("#login-error").textContent = "";
+}
+
+function showLogin(mode = authMode) {
   $("#app").classList.add("hidden");
   $("#login").classList.remove("hidden");
+  setAuthMode(mode);
+  $("#login-form").email.focus();
 }
+
+$("#switch-mode").addEventListener("click", () => setAuthMode(authMode === "signup" ? "login" : "signup"));
 
 $("#login-form").addEventListener("submit", async (e) => {
   e.preventDefault();
+  const f = e.target;
+  const signup = authMode === "signup";
+  const err = $("#login-error");
+  const email = f.email.value.trim(), password = f.password.value;
+  if (!email || !password) return (err.textContent = "Enter your email and password.");
+  if (signup && password.length < 8) return (err.textContent = "Password must be at least 8 characters.");
+  const btn = $("#login-submit");
+  btn.disabled = true;
   try {
-    await api("/api/login", { method: "POST", body: { password: e.target.password.value } });
+    await api(signup ? "/api/signup" : "/api/login", {
+      method: "POST", body: signup ? { name: f.name.value, email, password } : { email, password },
+    });
+    f.password.value = "";
     $("#login").classList.add("hidden");
-    boot();
-  } catch (err) {
-    $("#login-error").textContent = err.message;
+    await boot();
+  } catch (error) {
+    err.textContent = error.message;
+  } finally {
+    btn.disabled = false;
   }
 });
 
@@ -117,8 +152,11 @@ document.addEventListener("click", (e) => {
 
 async function boot() {
   const me = await api("/api/me");
-  if (!me.loggedIn) return showLogin();
-  $("#logout").classList.toggle("hidden", !me.passwordRequired);
+  signupAllowed = me.signupAllowed;
+  // A brand-new server has nobody to sign in as, so start on the sign-up form.
+  if (!me.user) return showLogin(me.hasUsers ? "login" : "signup");
+  $("#whoami").textContent = me.user.name;
+  $("#whoami").title = me.user.email;
   await loadBase();
   $("#app").classList.remove("hidden");
   router();
@@ -439,6 +477,7 @@ async function renderPosts(view, tab = "scheduled") {
     const editable = ["draft", "scheduled", "failed"].includes(p.status);
     const when = p.scheduled_at ? fmtDateTime(p.scheduled_at) : "No time set";
     const errors = p.targets.filter((t) => t.error && t.status !== "published");
+    const retrying = p.status === "scheduled" && p.next_attempt_at;
     return `
       <div class="post-item" data-id="${p.id}">
         <div>
@@ -451,6 +490,7 @@ async function renderPosts(view, tab = "scheduled") {
           ${p.media_url ? `<div class="muted small">🖼 image attached</div>` : ""}
           ${targetChips(p)}
           ${errors.map((t) => `<div class="error small">${esc(platformLabel(t.platform))}: ${esc(t.error)}</div>`).join("")}
+          ${retrying ? `<div class="muted small">Trying again at ${fmtTime(p.next_attempt_at)}</div>` : ""}
         </div>
         <div class="row" style="align-items:flex-start">
           ${editable ? `<a class="btn sm" href="#/compose/${p.id}">Edit</a>` : ""}
@@ -689,12 +729,12 @@ async function renderClaude(view) {
     <div class="stack">
       <div class="card stack">
         <h2>Your connector URL</h2>
-        <p class="muted small" style="margin:0">Treat this like a password. It contains your secret key.</p>
+        <p class="muted small" style="margin:0">Treat this like a password. It contains your secret key, and it only gives access to your own accounts and posts.</p>
         <div class="copy-field"><input readonly value="${esc(s.mcp.urlWithKey)}" id="mcp-url" type="password" />
           <button class="btn sm" data-toggle="mcp-url">Show</button>
           <button class="btn sm" data-copy="${esc(s.mcp.urlWithKey)}">Copy</button></div>
         ${isLocal ? `<p class="small" style="margin:0">⚠ <strong>claude.ai</strong> can't reach <code>localhost</code>. Deploy SocialSuite or expose it with a tunnel (for example <code>cloudflared tunnel --url http://localhost:3000</code>), then set <code>PUBLIC_URL</code> in <code>.env</code> to the HTTPS address. Claude Code and Claude Desktop on this computer work with localhost.</p>` : ""}
-        <div class="row">${s.mcp.fromEnv ? `<span class="muted small">Key is set by MCP_API_KEY in .env.</span>` : `<button class="btn sm danger" id="rotate">Generate a new key</button><span class="muted small">This breaks existing connections.</span>`}</div>
+        <div class="row"><button class="btn sm danger" id="rotate">Generate a new key</button><span class="muted small">This breaks existing connections.</span></div>
       </div>
 
       <div class="card stack">

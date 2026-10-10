@@ -1,0 +1,38 @@
+# Deploy to Fly.io:
+#   fly launch --no-deploy --copy-config        (pick your own app name and region)
+#   fly volumes create socialsuite_data --size 1
+#   fly secrets set ENCRYPTION_KEY=$(openssl rand -hex 32) PUBLIC_URL=https://<your-app>.fly.dev
+#   fly deploy
+# Add the platform keys you use the same way, e.g. fly secrets set X_CLIENT_ID=... X_CLIENT_SECRET=...
+
+app = "socialsuite-change-me"
+primary_region = "jnb"
+
+[build]
+
+[env]
+  PORT = "3000"
+  DATA_DIR = "/data"
+
+[mounts]
+  source = "socialsuite_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  # The scheduler runs inside the app, so the machine must never be put to sleep:
+  # a stopped machine publishes nothing until someone opens the site.
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    path = "/healthz"
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "10s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

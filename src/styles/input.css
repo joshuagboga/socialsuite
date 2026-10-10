@@ -89,7 +89,8 @@
   nav a { @apply rounded-lg px-2.5 py-2 text-ink no-underline hover:bg-surface-2; }
   nav a.active { @apply bg-accent-soft font-semibold text-accent; }
   .compose-btn { @apply order-3 md:order-none; }
-  .logout { @apply ml-auto md:mt-auto md:ml-0 md:self-start; }
+  .whoami { @apply ml-auto flex min-w-0 items-center gap-1 md:mt-auto md:ml-0 md:flex-col md:items-start md:gap-0; }
+  .whoami span { @apply max-w-full truncate px-1.5; }
   .view { @apply w-full max-w-[1180px] px-4 pt-5 pb-16 md:px-8 md:pt-7; }
   .page-head { @apply mb-5 flex flex-wrap items-end justify-between gap-3; }
 
@@ -103,6 +104,7 @@
   .btn.danger { @apply text-danger; }
   .btn.sm { @apply px-2.5 py-1 text-[13px]; }
   .link { @apply cursor-pointer border-0 bg-transparent p-1.5 text-muted hover:text-ink; }
+  .link.inline { @apply p-0 font-medium text-accent hover:text-accent hover:underline; }
 
   .card { @apply rounded-xl border border-line bg-surface p-[18px] shadow-sm; }
   .stack { @apply flex flex-col gap-3.5; }
@@ -123,6 +125,8 @@
   /* ---------- login ---------- */
   .login { @apply grid min-h-screen place-items-center p-4; }
   .login-card { @apply flex w-full max-w-[340px] flex-col gap-3.5; }
+  .login-lead { @apply -mt-2 text-center; }
+  .login-switch { @apply text-center; }
 
   /* ---------- compose ---------- */
   .compose { @apply grid grid-cols-1 items-start gap-5 lg:grid-cols-[minmax(0,1fr)_340px]; }

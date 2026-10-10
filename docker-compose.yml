@@ -1,0 +1,40 @@
+# Run SocialSuite on any server with Docker (a small VPS is enough), with HTTPS handled by Caddy.
+#
+#   1. Point your domain's DNS A record at the server.
+#   2. Create a .env file next to this one (see .env.example). It must contain at least:
+#        DOMAIN=social.example.com
+#        ENCRYPTION_KEY=<64 hex characters>
+#   3. docker compose up -d --build
+#
+# Data (database + uploaded images) is kept in the "socialsuite-data" volume across restarts and upgrades.
+
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PUBLIC_URL: https://${DOMAIN:?Set DOMAIN in .env}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Set ENCRYPTION_KEY in .env}
+      PORT: "3000"
+      DATA_DIR: /data
+    volumes:
+      - socialsuite-data:/data
+    # Give an in-flight publish time to finish before the container is stopped.
+    stop_grace_period: 30s
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    command: caddy reverse-proxy --from ${DOMAIN} --to app:3000
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - caddy-data:/data
+    depends_on:
+      - app
+
+volumes:
+  socialsuite-data:
+  caddy-data:

@@ -2,9 +2,10 @@
   "name": "socialsuite",
   "version": "1.0.0",
   "description": "Social media scheduler with a Claude connector (MCP)",
-  "main": "index.js",
+  "main": "src/server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node --test \"test/*.test.js\"",
+    "reset-password": "node scripts/reset-password.js",
     "start": "node src/server.js",
     "dev": "tailwindcss -i src/styles/input.css -o public/styles.css --watch=always & node --watch src/server.js",
     "build:css": "tailwindcss -i src/styles/input.css -o public/styles.css --minify",

@@ -5,99 +5,114 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { PORT, PUBLIC_URL, UPLOAD_DIR, ALLOW_SIGNUP, TRUST_PROXY } from "./config.js";
 import {
-  listAccounts, upsertAccount, deleteAccount, listPosts, getPost, savePost, deletePost,
-  getSetting, setSetting, db,
+  listAccounts, upsertAccount, deleteAccount, listPosts, getPost, savePost, deletePost, queuePostNow,
+  getMcpKey, rotateMcpKey, publicUser,
 } from "./db.js";
 import { platforms, platformSummary } from "./platforms.js";
-import { startScheduler, runSchedulerNow, UPLOAD_DIR } from "./scheduler.js";
-import { handleMcp, getMcpKey, rotateMcpKey } from "./mcp.js";
+import { startScheduler, stopScheduler, runSchedulerNow } from "./scheduler.js";
+import { handleMcp } from "./mcp.js";
 import { draftPosts, aiEnabled } from "./ai.js";
+import { signUp, checkLogin, startSession, endSession, loadUser, requireUser, hasUsers } from "./auth.js";
+import { rateLimit, createLimiter, tooMany } from "./ratelimit.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const PORT = Number(process.env.PORT || 3000);
-const PUBLIC_URL = (process.env.PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, "");
-const APP_PASSWORD = process.env.APP_PASSWORD || "";
 
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 const app = express();
-app.set("trust proxy", 1);
+app.set("trust proxy", TRUST_PROXY);
+app.disable("x-powered-by");
 app.use(cookieParser());
 
+// For load balancers and uptime checks.
+app.get("/healthz", (req, res) => res.json({ ok: true }));
+
 // ---------------------------------------------------------------- MCP (Claude connector)
-// Mounted before the session check: it authenticates with its own API key.
+// Mounted before the session check: it authenticates with each user's own connector key.
 app.all(["/mcp", "/mcp/:key"], express.json({ limit: "2mb" }), (req, res, next) =>
   handleMcp(req, res).catch(next)
 );
 
+// ---------------------------------------------------------------- rate limits
+// A ceiling on everything under /api and /auth, per IP address. Tighter limits for the
+// expensive or guessable endpoints are next to those routes.
+app.use(["/api", "/auth"], rateLimit({ windowMs: 60_000, max: 300 }));
+
 app.use(express.json({ limit: "2mb" }));
+app.use(loadUser);
 
-// ---------------------------------------------------------------- session auth
+// Turn anything a handler throws (sync or async) into a 400 with the message.
+const wrap = (fn) => (req, res) =>
+  new Promise((resolve) => resolve(fn(req, res))).catch((e) => res.status(400).json({ error: e.message || String(e) }));
 
-const SESSION_SECRET = process.env.SESSION_SECRET || getSetting("session_secret") || (() => {
-  const s = crypto.randomBytes(32).toString("hex");
-  setSetting("session_secret", s);
-  return s;
-})();
-const sign = (v) => v + "." + crypto.createHmac("sha256", SESSION_SECRET).update(v).digest("base64url");
-const verify = (signed) => {
-  if (!signed) return null;
-  const i = signed.lastIndexOf(".");
-  const v = signed.slice(0, i);
-  const expected = Buffer.from(sign(v));
-  const given = Buffer.from(signed);
-  return expected.length === given.length && crypto.timingSafeEqual(expected, given) ? v : null;
-};
-const SESSION_DAYS = 30;
+// ---------------------------------------------------------------- sign up, log in, log out
 
-function isLoggedIn(req) {
-  if (!APP_PASSWORD) return true;
-  const v = verify(req.cookies.ss_session);
-  return !!v && Number(v) > Date.now();
-}
+const signupAllowed = () => ALLOW_SIGNUP || !hasUsers();
 
-app.post("/api/login", (req, res) => {
-  const given = Buffer.from(String(req.body?.password ?? ""));
-  const want = Buffer.from(APP_PASSWORD);
-  if (!APP_PASSWORD || (given.length === want.length && crypto.timingSafeEqual(given, want))) {
-    const exp = Date.now() + SESSION_DAYS * 864e5;
-    res.cookie("ss_session", sign(String(exp)), {
-      httpOnly: true, sameSite: "lax", secure: PUBLIC_URL.startsWith("https"), maxAge: SESSION_DAYS * 864e5,
-    });
-    return res.json({ ok: true });
+app.get("/api/me", (req, res) =>
+  res.json({ user: publicUser(req.user), signupAllowed: signupAllowed(), hasUsers: hasUsers() })
+);
+
+app.post("/api/signup",
+  rateLimit({ windowMs: 60 * 60_000, max: 20, message: "Too many sign-up attempts from this network. Try again in an hour." }),
+  wrap(async (req, res) => {
+    if (!signupAllowed()) return res.status(403).json({ error: "Sign-ups are closed on this server" });
+    const user = await signUp(req.body || {});
+    startSession(res, user);
+    res.json({ user: publicUser(user) });
+  })
+);
+
+// Only failed logins count. Five wrong passwords for the same email from the same address lock
+// that pair out for 15 minutes; 30 failures from one address lock the address out, which stops
+// someone trying one password against many emails.
+const LOGIN_WINDOW = 15 * 60_000;
+const loginByPair = createLimiter({ windowMs: LOGIN_WINDOW, max: 5 });
+const loginByIp = createLimiter({ windowMs: LOGIN_WINDOW, max: 30 });
+
+app.post("/api/login", wrap(async (req, res) => {
+  const email = String(req.body?.email ?? "").trim().toLowerCase();
+  const pair = `${req.ip}|${email}`;
+  const blocked = [loginByPair.check(pair), loginByIp.check(req.ip)].find((c) => !c.allowed);
+  if (blocked) {
+    const mins = Math.ceil(blocked.retryAfter / 60);
+    return tooMany(res, blocked.retryAfter, `Too many failed sign-in attempts. Try again in ${mins} minute${mins === 1 ? "" : "s"}.`);
   }
-  res.status(401).json({ error: "Wrong password" });
-});
+  const user = await checkLogin(email, req.body?.password);
+  if (!user) {
+    loginByPair.hit(pair);
+    loginByIp.hit(req.ip);
+    return res.status(401).json({ error: "Wrong email or password" });
+  }
+  loginByPair.reset(pair);
+  startSession(res, user);
+  res.json({ user: publicUser(user) });
+}));
 
 app.post("/api/logout", (req, res) => {
-  res.clearCookie("ss_session");
+  endSession(req, res);
   res.json({ ok: true });
 });
 
-app.get("/api/me", (req, res) => res.json({ loggedIn: isLoggedIn(req), passwordRequired: !!APP_PASSWORD }));
-
 // Uploaded media must stay publicly reachable: Instagram, Threads and Facebook fetch it by URL.
-app.use("/uploads", express.static(UPLOAD_DIR, { maxAge: "7d" }));
+// File names are random UUIDs, so a URL cannot be guessed.
+app.use("/uploads", express.static(UPLOAD_DIR, {
+  maxAge: "7d", setHeaders: (res) => res.set("X-Content-Type-Options", "nosniff"),
+}));
 app.use(express.static(path.join(here, "..", "public")));
 
-const requireAuth = (req, res, next) => {
-  if (isLoggedIn(req)) return next();
-  if (req.path.startsWith("/auth/")) return res.redirect("/");
-  res.status(401).json({ error: "Not logged in" });
-};
-app.use(["/api", "/auth"], requireAuth);
-
-const wrap = (fn) => (req, res) =>
-  Promise.resolve(fn(req, res)).catch((e) => res.status(400).json({ error: e.message || String(e) }));
+// Everything below needs a signed-in user, and only ever touches req.user's own data.
+app.use(["/api", "/auth"], requireUser);
 
 // ---------------------------------------------------------------- platforms & accounts
 
 app.get("/api/platforms", (req, res) => res.json(platformSummary()));
-app.get("/api/accounts", (req, res) => res.json(listAccounts()));
+app.get("/api/accounts", (req, res) => res.json(listAccounts(req.user.id)));
 
 app.delete("/api/accounts/:id", (req, res) => {
-  deleteAccount(req.params.id) ? res.json({ ok: true }) : res.status(404).json({ error: "Not found" });
+  deleteAccount(req.user.id, req.params.id) ? res.json({ ok: true }) : res.status(404).json({ error: "Not found" });
 });
 
 app.post("/api/accounts/connect/:platform", wrap(async (req, res) => {
@@ -107,10 +122,10 @@ app.post("/api/accounts/connect/:platform", wrap(async (req, res) => {
     if (!f.label.includes("optional") && !req.body?.[f.name]) throw new Error(`${f.label} is required`);
   }
   const accounts = await p.connect(req.body);
-  res.json({ ids: accounts.map(upsertAccount) });
+  res.json({ ids: accounts.map((a) => upsertAccount({ ...a, user_id: req.user.id })) });
 }));
 
-// OAuth: state → { platform, verifier } held for 10 minutes.
+// OAuth: state → { platform, verifier, userId } held for 10 minutes.
 const oauthStates = new Map();
 const redirectUri = (platform) => `${PUBLIC_URL}/auth/${platform}/callback`;
 
@@ -122,7 +137,7 @@ app.get("/auth/:platform/start", (req, res) => {
   const state = crypto.randomBytes(16).toString("hex");
   const verifier = crypto.randomBytes(32).toString("base64url");
   const challenge = crypto.createHash("sha256").update(verifier).digest("base64url");
-  oauthStates.set(state, { platform: id, verifier, at: Date.now() });
+  oauthStates.set(state, { platform: id, verifier, userId: req.user.id, at: Date.now() });
   for (const [k, v] of oauthStates) if (Date.now() - v.at > 10 * 60_000) oauthStates.delete(k);
   res.redirect(p.oauth.authorizeUrl(state, redirectUri(id), challenge));
 });
@@ -133,11 +148,12 @@ app.get("/auth/:platform/callback", async (req, res) => {
   oauthStates.delete(state);
   const back = (q) => res.redirect(`/#/accounts?${q}`);
   if (error) return back(`error=${encodeURIComponent(error_description || error)}`);
-  if (!saved || saved.platform !== req.params.platform) return back("error=" + encodeURIComponent("Login expired, try again"));
+  // The account is attached to whoever started the flow, and only if they are still the one signed in.
+  if (!saved || saved.platform !== req.params.platform || saved.userId !== req.user.id) return back("error=" + encodeURIComponent("Login expired, try again"));
   try {
     const p = platforms[saved.platform];
     const accounts = await p.oauth.exchange(code, redirectUri(saved.platform), saved.verifier);
-    accounts.forEach(upsertAccount);
+    accounts.forEach((a) => upsertAccount({ ...a, user_id: req.user.id }));
     back(`connected=${accounts.length}`);
   } catch (e) {
     console.error("[oauth]", saved.platform, e);
@@ -160,35 +176,33 @@ function postInput(body) {
 
 app.get("/api/posts", (req, res) => {
   const { status, from, to } = req.query;
-  res.json(listPosts({ status, from: from && Number(from), to: to && Number(to), limit: 500 }));
+  res.json(listPosts(req.user.id, { status, from: from && Number(from), to: to && Number(to), limit: 500 }));
 });
 
 app.get("/api/posts/:id", (req, res) => {
-  const p = getPost(req.params.id);
+  const p = getPost(req.user.id, req.params.id);
   p ? res.json(p) : res.status(404).json({ error: "Not found" });
 });
 
-app.post("/api/posts", wrap((req, res) => res.json(savePost(postInput(req.body)))));
-app.put("/api/posts/:id", wrap((req, res) => res.json(savePost({ id: req.params.id, ...postInput(req.body) }))));
+app.post("/api/posts", wrap((req, res) => res.json(savePost({ ...postInput(req.body), user_id: req.user.id }))));
+app.put("/api/posts/:id", wrap((req, res) =>
+  res.json(savePost({ ...postInput(req.body), id: req.params.id, user_id: req.user.id }))));
 
 app.delete("/api/posts/:id", wrap((req, res) => {
-  deletePost(req.params.id) ? res.json({ ok: true }) : res.status(404).json({ error: "Not found" });
+  deletePost(req.user.id, req.params.id) ? res.json({ ok: true }) : res.status(404).json({ error: "Not found" });
 }));
 
 app.post("/api/posts/:id/publish", wrap(async (req, res) => {
-  const p = getPost(req.params.id);
-  if (!p) throw new Error("Not found");
-  if (!["draft", "scheduled", "failed", "partial"].includes(p.status)) throw new Error(`Post is ${p.status}`);
-  db.prepare("UPDATE post_targets SET status='pending', attempts=0, error=NULL WHERE post_id=? AND status!='published'").run(p.id);
-  db.prepare("UPDATE posts SET status='scheduled', scheduled_at=?, updated_at=? WHERE id=?").run(Date.now(), Date.now(), p.id);
+  queuePostNow(req.user.id, req.params.id);
   await runSchedulerNow();
-  res.json(getPost(p.id));
+  res.json(getPost(req.user.id, req.params.id));
 }));
 
 // ---------------------------------------------------------------- media upload
 
 const EXT = { "image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp" };
-app.post("/api/upload", express.raw({ type: Object.keys(EXT), limit: "8mb" }), (req, res) => {
+const perUser = (req) => req.user.id;
+app.post("/api/upload", rateLimit({ windowMs: 60 * 60_000, max: 60, key: perUser }), express.raw({ type: Object.keys(EXT), limit: "8mb" }), (req, res) => {
   const ext = EXT[req.headers["content-type"]];
   if (!ext || !req.body?.length) return res.status(400).json({ error: "Upload a PNG, JPEG, GIF or WebP image (max 8 MB)" });
   const name = crypto.randomUUID() + ext;
@@ -198,7 +212,11 @@ app.post("/api/upload", express.raw({ type: Object.keys(EXT), limit: "8mb" }), (
 
 // ---------------------------------------------------------------- Claude writing assistant
 
-app.post("/api/ai/draft", wrap(async (req, res) => {
+// Drafting spends the server's Anthropic credit, so each user gets 30 drafts an hour.
+const aiLimit = rateLimit({
+  windowMs: 60 * 60_000, max: 30, key: perUser, message: "You've used Write with Claude a lot this hour. Try again later.",
+});
+app.post("/api/ai/draft", aiLimit, wrap(async (req, res) => {
   if (!aiEnabled()) throw new Error("Set ANTHROPIC_API_KEY in .env to use Write with Claude");
   const { brief, draft, platforms: platformIds, tone } = req.body || {};
   if (!brief?.trim() && !draft?.trim()) throw new Error("Describe the post, or write a draft first");
@@ -208,11 +226,11 @@ app.post("/api/ai/draft", wrap(async (req, res) => {
 // ---------------------------------------------------------------- settings
 
 app.get("/api/settings", (req, res) => {
-  const key = getMcpKey();
+  const key = getMcpKey(req.user.id);
   res.json({
     publicUrl: PUBLIC_URL,
     aiEnabled: aiEnabled(),
-    mcp: { url: `${PUBLIC_URL}/mcp`, key, urlWithKey: `${PUBLIC_URL}/mcp/${key}`, fromEnv: !!process.env.MCP_API_KEY },
+    mcp: { url: `${PUBLIC_URL}/mcp`, key, urlWithKey: `${PUBLIC_URL}/mcp/${key}` },
     redirectUris: Object.fromEntries(
       Object.entries(platforms).filter(([, p]) => p.oauth).map(([id]) => [id, redirectUri(id)])
     ),
@@ -220,8 +238,7 @@ app.get("/api/settings", (req, res) => {
 });
 
 app.post("/api/settings/rotate-mcp-key", (req, res) => {
-  if (process.env.MCP_API_KEY) return res.status(400).json({ error: "MCP_API_KEY is set in .env; change it there" });
-  res.json({ key: rotateMcpKey() });
+  res.json({ key: rotateMcpKey(req.user.id) });
 });
 
 app.use((err, req, res, next) => {
@@ -230,7 +247,7 @@ app.use((err, req, res, next) => {
 });
 
 // Express 5 passes listen errors (e.g. port in use) to this callback instead of throwing.
-app.listen(PORT, (err) => {
+const server = app.listen(PORT, (err) => {
   if (err) {
     console.error(err.code === "EADDRINUSE"
       ? `Port ${PORT} is already in use. Stop the other process or set PORT in .env.`
@@ -238,6 +255,26 @@ app.listen(PORT, (err) => {
     process.exit(1);
   }
   console.log(`SocialSuite running at ${PUBLIC_URL}`);
-  if (!APP_PASSWORD) console.warn("⚠  APP_PASSWORD is not set — anyone who can reach this server can use it.");
+  if (process.env.APP_PASSWORD) {
+    console.warn("APP_PASSWORD is no longer used. People now sign up with their own email and password; remove it from .env.");
+  }
+  if (!hasUsers()) console.log("No accounts yet. Open the app and sign up to create the first one.");
   startScheduler();
 });
+
+// On a deploy or restart the host sends SIGTERM. Finish the publish in progress before exiting,
+// so a post is not cut off halfway through being sent.
+let stopping = false;
+async function shutdown(signal) {
+  if (stopping) return;
+  stopping = true;
+  console.log(`${signal} received, finishing in-flight work…`);
+  server.close();
+  server.closeIdleConnections?.();
+  const giveUp = setTimeout(() => process.exit(1), 25_000);
+  giveUp.unref();
+  await stopScheduler();
+  process.exit(0);
+}
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
