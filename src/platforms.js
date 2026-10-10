@@ -3,15 +3,18 @@
 //   oauth: { authorizeUrl(state, redirectUri, pkce), exchange(code, redirectUri, pkce) -> [account] }
 //   connect(fields) -> [account]                    (credentials platforms)
 //   refresh(account) -> { credentials, token_expires_at } | null
-//   publish(account, { text, media }) -> { remote_id, remote_url }
+//   publish(account, { text, media, idempotencyKey }) -> { remote_id, remote_url }
 // `media` is { url, bytes, mime } when the post has an image, else null.
+// `idempotencyKey` is stable for a given post + account + text; pass it on where the platform supports one.
 
 const env = (k) => process.env[k] || "";
 
 class PlatformError extends Error {}
+const HTTP_TIMEOUT_MS = 60_000;
 
 async function http(url, { method = "GET", headers = {}, json, form, body } = {}) {
-  const init = { method, headers: { ...headers } };
+  // Never wait forever: one stuck request would hold up every user's queue.
+  const init = { method, headers: { ...headers }, signal: AbortSignal.timeout(HTTP_TIMEOUT_MS) };
   if (json !== undefined) {
     init.body = JSON.stringify(json);
     init.headers["Content-Type"] = "application/json";
@@ -20,8 +23,14 @@ async function http(url, { method = "GET", headers = {}, json, form, body } = {}
   } else if (body !== undefined) {
     init.body = body;
   }
-  const res = await fetch(url, init);
-  const text = await res.text();
+  let res, text;
+  try {
+    res = await fetch(url, init);
+    text = await res.text();
+  } catch (e) {
+    const host = new URL(url).host;
+    throw new PlatformError(e.name === "TimeoutError" ? `${host} did not respond in time` : `Could not reach ${host}: ${e.cause?.code || e.message}`);
+  }
   let data;
   try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
   if (!res.ok) {
@@ -177,6 +186,7 @@ const linkedin = {
       });
       const put = await fetch(data.value.uploadUrl, {
         method: "PUT", headers: { Authorization: headers.Authorization }, body: media.bytes,
+        signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
       });
       if (!put.ok) throw new PlatformError(`LinkedIn image upload failed (${put.status})`);
       post.content = { media: { id: data.value.image } };
@@ -463,7 +473,7 @@ const mastodon = {
     }];
   },
   refresh: async () => null,
-  async publish(account, { text, media }) {
+  async publish(account, { text, media, idempotencyKey }) {
     const { instance, access_token } = account.credentials;
     const auth = { Authorization: `Bearer ${access_token}` };
     const payload = { status: text };
@@ -474,7 +484,7 @@ const mastodon = {
       payload.media_ids = [data.id];
     }
     const { data } = await http(`${instance}/api/v1/statuses`, {
-      method: "POST", headers: { ...auth, "Idempotency-Key": crypto.randomUUID() }, json: payload,
+      method: "POST", headers: { ...auth, "Idempotency-Key": idempotencyKey || crypto.randomUUID() }, json: payload,
     });
     return { remote_id: data.id, remote_url: data.url };
   },

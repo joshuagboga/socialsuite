@@ -1,26 +1,13 @@
-import crypto from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { listAccounts, listPosts, getPost, savePost, deletePost, getSetting, setSetting, db } from "./db.js";
+import { listAccounts, listPosts, getPost, savePost, deletePost, queuePostNow, getUserByMcpKey } from "./db.js";
 import { platforms } from "./platforms.js";
 import { runSchedulerNow } from "./scheduler.js";
+import { createLimiter, tooMany } from "./ratelimit.js";
 
-export function getMcpKey() {
-  if (process.env.MCP_API_KEY) return process.env.MCP_API_KEY;
-  let key = getSetting("mcp_api_key");
-  if (!key) {
-    key = "ss_" + crypto.randomBytes(24).toString("base64url");
-    setSetting("mcp_api_key", key);
-  }
-  return key;
-}
-
-export function rotateMcpKey() {
-  const key = "ss_" + crypto.randomBytes(24).toString("base64url");
-  setSetting("mcp_api_key", key);
-  return key;
-}
+// Every user has their own connector key (see getMcpKey / rotateMcpKey in db.js). The key decides
+// whose accounts and posts a request can see; nothing here ever reads another user's data.
 
 const ok = (data) => ({ content: [{ type: "text", text: JSON.stringify(data, null, 2) }] });
 const fail = (msg) => ({ content: [{ type: "text", text: msg }], isError: true });
@@ -47,8 +34,8 @@ function parseWhen(when) {
 }
 
 /** Resolve account ids and/or platform names to concrete account ids. */
-function resolveTargets(account_ids = [], platformNames = []) {
-  const accounts = listAccounts();
+function resolveTargets(userId, account_ids = [], platformNames = []) {
+  const accounts = listAccounts(userId);
   const ids = new Set(account_ids);
   for (const id of account_ids) {
     if (!accounts.some((a) => a.id === id)) throw new Error(`Unknown account_id ${id}. Call list_accounts.`);
@@ -75,7 +62,8 @@ function checkLimits(targets, content, variants, media_url) {
 
 const platformEnum = z.enum(Object.keys(platforms));
 
-function buildServer() {
+function buildServer(user) {
+  const userId = user.id;
   const server = new McpServer(
     { name: "socialsuite", version: "1.0.0" },
     {
@@ -96,7 +84,7 @@ function buildServer() {
       annotations: { readOnlyHint: true },
     },
     async () =>
-      ok(listAccounts().map((a) => ({
+      ok(listAccounts(userId).map((a) => ({
         account_id: a.id, platform: a.platform, name: a.name, handle: a.handle,
         char_limit: platforms[a.platform].limit, requires_image: !!platforms[a.platform].requiresMedia,
       })))
@@ -117,7 +105,7 @@ function buildServer() {
       annotations: { readOnlyHint: true },
     },
     async ({ status = "scheduled", from, to, limit = 50 }) =>
-      ok(listPosts({ status, from: from ? parseWhen(from) : undefined, to: to ? parseWhen(to) : undefined, limit })
+      ok(listPosts(userId, { status, from: from ? parseWhen(from) : undefined, to: to ? parseWhen(to) : undefined, limit })
         .map(summarizePost))
   );
 
@@ -130,7 +118,7 @@ function buildServer() {
       annotations: { readOnlyHint: true },
     },
     async ({ post_id }) => {
-      const p = getPost(post_id);
+      const p = getPost(userId, post_id);
       return p ? ok(summarizePost(p)) : fail("Post not found");
     }
   );
@@ -160,14 +148,14 @@ function buildServer() {
     },
     async ({ content, account_ids, platforms: pf, variants, media_url, scheduled_at, draft }) => {
       try {
-        const targets = resolveTargets(account_ids, pf);
+        const targets = resolveTargets(userId, account_ids, pf);
         const problems = checkLimits(targets, content, variants, media_url);
         if (problems.length) return fail("Not scheduled. Fix these first:\n" + problems.join("\n"));
         if (!draft && !scheduled_at) return fail("Provide scheduled_at, or set draft=true.");
         const when = draft ? null : parseWhen(scheduled_at);
         if (when && when < Date.now() - 60_000) return fail("scheduled_at is in the past. Use publish_now to post immediately.");
         const post = savePost({
-          content, media_url, scheduled_at: when, draft: !!draft, source: "claude",
+          user_id: userId, content, media_url, scheduled_at: when, draft: !!draft, source: "claude",
           targets: targets.map((t) => ({ account_id: t.id, content_override: variants?.[t.platform] })),
         });
         return ok({ message: draft ? "Draft saved" : "Scheduled", post: summarizePost(post) });
@@ -191,23 +179,22 @@ function buildServer() {
       try {
         let id = post_id;
         if (id) {
-          const p = getPost(id);
+          const p = getPost(userId, id);
           if (!p) return fail("Post not found");
-          if (!["draft", "scheduled", "failed"].includes(p.status)) return fail(`Post is already ${p.status}`);
-          db.prepare("UPDATE post_targets SET status='pending', attempts=0, error=NULL WHERE post_id=? AND status!='published'").run(id);
-          db.prepare("UPDATE posts SET status='scheduled', scheduled_at=?, updated_at=? WHERE id=?").run(Date.now(), Date.now(), id);
+          if (!["draft", "scheduled", "failed", "partial"].includes(p.status)) return fail(`Post is already ${p.status}`);
+          queuePostNow(userId, id);
         } else {
           if (!content) return fail("Provide content or post_id.");
-          const targets = resolveTargets(account_ids, pf);
+          const targets = resolveTargets(userId, account_ids, pf);
           const problems = checkLimits(targets, content, variants, media_url);
           if (problems.length) return fail("Not published. Fix these first:\n" + problems.join("\n"));
           id = savePost({
-            content, media_url, scheduled_at: Date.now(), source: "claude",
+            user_id: userId, content, media_url, scheduled_at: Date.now(), source: "claude",
             targets: targets.map((t) => ({ account_id: t.id, content_override: variants?.[t.platform] })),
           }).id;
         }
         await runSchedulerNow();
-        return ok(summarizePost(getPost(id)));
+        return ok(summarizePost(getPost(userId, id)));
       } catch (e) {
         return fail(e.message);
       }
@@ -232,10 +219,10 @@ function buildServer() {
     },
     async ({ post_id, content, scheduled_at, account_ids, platforms: pf, variants, media_url, draft }) => {
       try {
-        const p = getPost(post_id);
+        const p = getPost(userId, post_id);
         if (!p) return fail("Post not found");
         const targets = account_ids || pf
-          ? resolveTargets(account_ids, pf)
+          ? resolveTargets(userId, account_ids, pf)
           : p.targets.map((t) => ({ id: t.account_id, platform: t.platform }));
         const newContent = content ?? p.content;
         const newMedia = media_url === undefined ? p.media_url : media_url;
@@ -245,7 +232,7 @@ function buildServer() {
         if (problems.length) return fail("Not updated. Fix these first:\n" + problems.join("\n"));
         const when = draft ? null : scheduled_at ? parseWhen(scheduled_at) : p.scheduled_at;
         const post = savePost({
-          id: post_id, content: newContent, media_url: newMedia, scheduled_at: when,
+          user_id: userId, id: post_id, content: newContent, media_url: newMedia, scheduled_at: when,
           draft: draft ?? p.status === "draft",
           targets: targets.map((t) => ({ account_id: t.id, content_override: newVariants[t.platform] })),
         });
@@ -266,7 +253,7 @@ function buildServer() {
     },
     async ({ post_id }) => {
       try {
-        return deletePost(post_id) ? ok({ message: "Deleted" }) : fail("Post not found");
+        return deletePost(userId, post_id) ? ok({ message: "Deleted" }) : fail("Post not found");
       } catch (e) {
         return fail(e.message);
       }
@@ -276,22 +263,30 @@ function buildServer() {
   return server;
 }
 
-function authorized(req) {
-  const key = getMcpKey();
-  const given = req.params.key || req.headers.authorization?.replace(/^Bearer\s+/i, "") || "";
-  const a = Buffer.from(given), b = Buffer.from(key);
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
-}
+// Wrong keys: 10 per 15 minutes per IP address, so keys cannot be guessed by brute force.
+const badKeyLimiter = createLimiter({ windowMs: 15 * 60_000, max: 10 });
+// Valid traffic: 120 requests per minute per user.
+const userLimiter = createLimiter({ windowMs: 60_000, max: 120 });
 
 /** Stateless Streamable HTTP endpoint: a fresh server + transport per request. */
 export async function handleMcp(req, res) {
-  if (!authorized(req)) {
+  const blocked = badKeyLimiter.check(req.ip);
+  if (!blocked.allowed) return tooMany(res, blocked.retryAfter, "Too many failed attempts. Try again later.");
+
+  const given = req.params.key || req.headers.authorization?.replace(/^Bearer\s+/i, "") || "";
+  const user = getUserByMcpKey(given);
+  if (!user) {
+    badKeyLimiter.hit(req.ip);
     return res.status(401).json({ jsonrpc: "2.0", error: { code: -32001, message: "Unauthorized" }, id: null });
   }
+  const usage = userLimiter.check(user.id);
+  if (!usage.allowed) return tooMany(res, usage.retryAfter);
+  userLimiter.hit(user.id);
+
   if (req.method !== "POST") {
     return res.status(405).json({ jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed" }, id: null });
   }
-  const server = buildServer();
+  const server = buildServer(user);
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
   res.on("close", () => { transport.close(); server.close(); });
   await server.connect(transport);
