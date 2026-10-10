@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Privacy policy · SocialSuite</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%235b5bd6'/><path d='M9 21l5-5 4 4 5-8' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <main class="doc">
+    <a class="brand" href="/"><span class="logo"></span>SocialSuite</a>
+    <h1>Privacy policy</h1>
+    <p class="muted">Last updated: {{UPDATED}}</p>
+
+    <p>SocialSuite is a tool for writing social media posts once and publishing them to the accounts you connect, now or at a time you choose. This page explains what information this site keeps about you, why, and what you can do about it. This site ({{SITE}}) is run by {{OPERATOR}}.</p>
+
+    <h2>What we collect</h2>
+    <ul>
+      <li><strong>Your account details.</strong> Your name, your email address and your password. The password is stored only as a one-way hash, so nobody, including us, can read it.</li>
+      <li><strong>The social accounts you connect.</strong> For each one: its name, handle, profile picture address and platform ID, plus the access token (or, for Bluesky, the app password) that lets SocialSuite post for you. These tokens are encrypted before they are saved. We never see or store the password of your X, LinkedIn, Facebook, Instagram or Threads account; you sign in on the platform's own page.</li>
+      <li><strong>Your posts.</strong> The text, images, schedule times and target accounts of the posts and drafts you create, and the result of each attempt to publish (links to the published post, or the error).</li>
+      <li><strong>A sign-in cookie.</strong> One cookie, <code>ss_session</code>, keeps you signed in for up to 30 days. It is required for the site to work. There are no advertising or analytics cookies and no third-party trackers.</li>
+      <li><strong>Your IP address, briefly.</strong> It is held in memory for up to an hour to limit abuse such as password guessing. It is not written to the database. Our hosting provider may keep its own standard access logs.</li>
+    </ul>
+    <p>We do not read your feeds, followers, messages or contacts on any connected platform.</p>
+
+    <h2>How we use it</h2>
+    <ul>
+      <li>To sign you in and keep your data separate from every other user's.</li>
+      <li>To publish your posts to the accounts you chose, at the times you chose.</li>
+      <li>To show you your calendar, drafts and publishing history.</li>
+      <li>To protect the service from abuse.</li>
+    </ul>
+    <p>We do not sell your information, show ads, or use your posts for anything other than publishing them for you.</p>
+
+    <h2>Who else receives your information</h2>
+    <ul>
+      <li><strong>The platforms you connect.</strong> When a post is published, its text and image are sent to the platforms you selected (X, LinkedIn, Facebook, Instagram, Threads, Bluesky or Mastodon). What they do with it is covered by their own privacy policies.</li>
+      <li><strong>Anthropic, only if you use "Write with Claude".</strong> The brief or draft you type is sent to Anthropic's API to produce suggestions. Nothing is sent unless you press that button.</li>
+      <li><strong>Claude, only if you set up the Claude connector.</strong> If you add your connector link to Claude, it can see your connected account names and your posts, and can schedule, edit or publish posts for you. You can cut this off at any time by generating a new key.</li>
+      <li><strong>The company that hosts this site,</strong> which stores the database on our behalf.</li>
+    </ul>
+
+    <h2>Images you upload are public links</h2>
+    <p>Some platforms fetch images from a web address, so every image you upload gets a public link. The link is long and random and is not listed anywhere, but anyone who has it can view the image. Do not upload an image you would not be willing to post.</p>
+
+    <h2>How long we keep it</h2>
+    <ul>
+      <li>Your account, connected accounts and posts are kept until you delete them or ask us to delete your account.</li>
+      <li>Disconnecting a social account deletes its token from our database straight away. To fully revoke access, also remove SocialSuite from that platform's list of connected apps.</li>
+      <li>Deleting a post removes it from SocialSuite. It does not remove anything already published on a platform; delete that on the platform itself.</li>
+      <li>Sign-in sessions expire after 30 days, or immediately when you sign out.</li>
+    </ul>
+
+    <h2>How we protect it</h2>
+    <p>Passwords are hashed with scrypt. Access tokens and connector keys are encrypted with AES-256-GCM. Sign-in and sign-up attempts are rate limited. No system is perfectly secure, so if we learn of a breach that affects you, we will tell you.</p>
+
+    <h2>Your choices and rights</h2>
+    <p>You can edit or delete your posts and disconnect accounts yourself at any time. You can also ask us for a copy of your data, to correct it, or to delete your account and everything in it. Depending on where you live, data protection law (for example Nigeria's Data Protection Act or the GDPR) may give you further rights, including the right to complain to your data protection authority.</p>
+
+    <h2>Children</h2>
+    <p>SocialSuite is not meant for anyone under 16, and we do not knowingly collect their information.</p>
+
+    <h2>Changes</h2>
+    <p>When this policy changes, we will update the date at the top of this page.</p>
+
+    <h2>Contact</h2>
+    <p>{{CONTACT}}</p>
+  </main>
+</body>
+</html>

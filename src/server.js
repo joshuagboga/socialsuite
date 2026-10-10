@@ -5,7 +5,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { PORT, PUBLIC_URL, UPLOAD_DIR, ALLOW_SIGNUP, TRUST_PROXY } from "./config.js";
+import { PORT, PUBLIC_URL, UPLOAD_DIR, ALLOW_SIGNUP, TRUST_PROXY, IS_PROD } from "./config.js";
 import {
   listAccounts, upsertAccount, deleteAccount, listPosts, getPost, savePost, deletePost, queuePostNow,
   getMcpKey, rotateMcpKey, publicUser,
@@ -25,6 +25,20 @@ const app = express();
 app.set("trust proxy", TRUST_PROXY);
 app.disable("x-powered-by");
 app.use(cookieParser());
+
+// ---------------------------------------------------------------- privacy policy
+// Public page. The operator's name and contact address come from .env so the same code can be
+// hosted by anyone. Review the text in src/pages/privacy.html before you open sign-ups.
+const htmlEscape = (s) => String(s).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+const PRIVACY_UPDATED = "10 October 2026"; // change this when you change the policy text
+const privacyPage = fs.readFileSync(path.join(here, "pages", "privacy.html"), "utf8")
+  .replaceAll("{{UPDATED}}", PRIVACY_UPDATED)
+  .replaceAll("{{SITE}}", htmlEscape(new URL(PUBLIC_URL).host))
+  .replaceAll("{{OPERATOR}}", htmlEscape(process.env.OPERATOR_NAME || "the person or team who gave you access to it"))
+  .replaceAll("{{CONTACT}}", process.env.CONTACT_EMAIL
+    ? `Questions or requests about your data: <a href="mailto:${htmlEscape(process.env.CONTACT_EMAIL)}">${htmlEscape(process.env.CONTACT_EMAIL)}</a>.`
+    : "For questions or requests about your data, contact the person or team who gave you access to this site.");
+app.get("/privacy", (req, res) => res.type("html").send(privacyPage));
 
 // For load balancers and uptime checks.
 app.get("/healthz", (req, res) => res.json({ ok: true }));
@@ -257,6 +271,9 @@ const server = app.listen(PORT, (err) => {
   console.log(`SocialSuite running at ${PUBLIC_URL}`);
   if (process.env.APP_PASSWORD) {
     console.warn("APP_PASSWORD is no longer used. People now sign up with their own email and password; remove it from .env.");
+  }
+  if (IS_PROD && !process.env.CONTACT_EMAIL) {
+    console.warn("CONTACT_EMAIL is not set, so the privacy policy at /privacy has no contact address. Add it to your environment.");
   }
   if (!hasUsers()) console.log("No accounts yet. Open the app and sign up to create the first one.");
   startScheduler();
