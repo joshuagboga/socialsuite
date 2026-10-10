@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SocialSuite</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%235b5bd6'/><path d='M9 21l5-5 4 4 5-8' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="login" class="login hidden">
+    <form class="login-card" id="login-form">
+      <div class="brand big"><span class="logo"></span>SocialSuite</div>
+      <label>Password<input type="password" name="password" autofocus required /></label>
+      <button class="btn primary" type="submit">Sign in</button>
+      <p class="error" id="login-error"></p>
+    </form>
+  </div>
+
+  <div id="app" class="shell hidden">
+    <aside class="sidebar">
+      <div class="brand"><span class="logo"></span>SocialSuite</div>
+      <button class="btn primary compose-btn" data-nav="#/compose">+ New post</button>
+      <nav>
+        <a href="#/calendar" data-route="calendar">Calendar</a>
+        <a href="#/posts" data-route="posts">Posts</a>
+        <a href="#/accounts" data-route="accounts">Accounts</a>
+        <a href="#/claude" data-route="claude">Claude connector</a>
+      </nav>
+      <button class="link logout" id="logout">Sign out</button>
+    </aside>
+    <main id="view" class="view"></main>
+  </div>
+
+  <div id="modal" class="modal hidden"><div class="modal-card" id="modal-card"></div></div>
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="app.js" type="module"></script>
+</body>
+</html>

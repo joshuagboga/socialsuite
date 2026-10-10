@@ -1,0 +1,32 @@
+{
+  "name": "socialsuite",
+  "version": "1.0.0",
+  "description": "Social media scheduler with a Claude connector (MCP)",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node src/server.js",
+    "dev": "tailwindcss -i src/styles/input.css -o public/styles.css --watch=always & node --watch src/server.js",
+    "build:css": "tailwindcss -i src/styles/input.css -o public/styles.css --minify",
+    "prestart": "npm run build:css"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.133.0",
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "cookie-parser": "^1.4.7",
+    "dotenv": "^18.0.7",
+    "express": "^5.3.0",
+    "zod": "^4.6.5"
+  },
+  "engines": {
+    "node": ">=22.5"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.3.3",
+    "tailwindcss": "^4.3.3"
+  }
+}
