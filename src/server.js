@@ -5,7 +5,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { PORT, PUBLIC_URL, UPLOAD_DIR, ALLOW_SIGNUP, TRUST_PROXY, IS_PROD } from "./config.js";
+import { PORT, PUBLIC_URL, UPLOAD_DIR, ALLOW_SIGNUP, TRUST_PROXY, IS_PROD, CLIENT_IP_HEADER } from "./config.js";
 import {
   listAccounts, upsertAccount, deleteAccount, listPosts, getPost, savePost, deletePost, queuePostNow,
   getMcpKey, rotateMcpKey, publicUser,
@@ -24,6 +24,14 @@ fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 const app = express();
 app.set("trust proxy", TRUST_PROXY);
 app.disable("x-powered-by");
+if (CLIENT_IP_HEADER) {
+  // Rate limits key on req.ip, so make it the address the host's proxy reports.
+  app.use((req, res, next) => {
+    const ip = req.headers[CLIENT_IP_HEADER];
+    if (typeof ip === "string" && ip) Object.defineProperty(req, "ip", { value: ip.trim(), configurable: true });
+    next();
+  });
+}
 app.use(cookieParser());
 
 // ---------------------------------------------------------------- privacy policy

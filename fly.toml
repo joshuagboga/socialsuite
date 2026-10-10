@@ -2,17 +2,23 @@
 #   fly launch --no-deploy --copy-config        (pick your own app name and region)
 #   fly volumes create socialsuite_data --size 1
 #   fly secrets set ENCRYPTION_KEY=$(openssl rand -hex 32) PUBLIC_URL=https://<your-app>.fly.dev
+#   (save that ENCRYPTION_KEY somewhere safe first: without it the stored tokens cannot be read)
 #   fly deploy
 # Add the platform keys you use the same way, e.g. fly secrets set X_CLIENT_ID=... X_CLIENT_SECRET=...
 
 app = "socialsuite-change-me"
 primary_region = "jnb"
+# On a deploy or restart, give a publish in progress time to finish before the machine is stopped.
+kill_signal = "SIGTERM"
+kill_timeout = "30s"
 
 [build]
 
 [env]
   PORT = "3000"
   DATA_DIR = "/data"
+  # Fly's proxy puts each visitor's real address in this header; rate limits use it.
+  CLIENT_IP_HEADER = "fly-client-ip"
 
 [mounts]
   source = "socialsuite_data"
