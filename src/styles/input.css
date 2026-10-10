@@ -3,6 +3,7 @@
 
 /* Scan the dashboard markup, including classes generated in app.js. */
 @source "../../public";
+@source "../pages";
 
 /* Theme colors as CSS variables so light/dark switches in one place. */
 :root {
@@ -127,6 +128,14 @@
   .login-card { @apply flex w-full max-w-[340px] flex-col gap-3.5; }
   .login-lead { @apply -mt-2 text-center; }
   .login-switch { @apply text-center; }
+
+  /* ---------- plain document pages (privacy policy) ---------- */
+  .doc { @apply mx-auto max-w-[680px] px-5 pt-8 pb-20 text-[15px] leading-relaxed; }
+  .doc .brand { @apply mb-8 px-0 text-ink no-underline; }
+  .doc h1 { @apply text-[28px]; }
+  .doc h2 { @apply mt-8 mb-2 text-lg; }
+  .doc p { @apply mb-3; }
+  .doc ul { @apply mb-3 flex list-disc flex-col gap-2 pl-5; }
 
   /* ---------- compose ---------- */
   .compose { @apply grid grid-cols-1 items-start gap-5 lg:grid-cols-[minmax(0,1fr)_340px]; }

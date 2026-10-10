@@ -46,6 +46,10 @@ Run the tests with `npm test`. They start the real server against a throwaway da
 
   Limits by address rely on `TRUST_PROXY` being right when the app sits behind a proxy (see `.env.example`).
 
+### Privacy policy
+
+A privacy policy is served at `/privacy` and linked from the sign-in page. Set `OPERATOR_NAME` and `CONTACT_EMAIL` in `.env` so it says who runs the site and how to reach them. The text lives in `src/pages/privacy.html`; it describes what this code actually stores, but read it, adjust it to your situation and have it checked before you rely on it. Use `PUBLIC_URL/privacy` wherever a platform's developer portal asks for a privacy policy URL.
+
 ### Upgrading from the single-user version
 
 Start the new version on your existing `./data` folder. The database is upgraded in place, stored tokens are encrypted, and **the first person to sign up takes over the existing accounts, posts and Claude connector key**, so sign up yourself before sharing the link. `APP_PASSWORD` and `MCP_API_KEY` are no longer used; remove them from `.env`. Copy `./data` somewhere first if you want a way back.
@@ -144,6 +148,7 @@ src/scheduler.js   Publishes due posts, refreshes tokens, retries failures, cras
 src/mcp.js         MCP server (Streamable HTTP) for the Claude connector, one key per user
 src/ai.js          "Write with Claude" via the Anthropic API
 src/config.js      Settings read from the environment
+src/pages/         Server-rendered pages (privacy policy)
 public/            Single-page dashboard (no build step)
 test/              node:test suites
 Dockerfile, docker-compose.yml, fly.toml   Deployment
