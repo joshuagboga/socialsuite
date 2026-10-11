@@ -76,7 +76,7 @@ Styles are written with Tailwind CSS v4 in `src/styles/input.css` and compiled b
 | Mastodon | Accounts → Connect | Instance URL + access token (Preferences → Development → New application; scopes `read:accounts write:statuses write:media`) |
 | X | OAuth | App at developer.x.com with OAuth 2.0 (Web App). Set `X_CLIENT_ID` / `X_CLIENT_SECRET`. Posting needs a paid API tier. |
 | LinkedIn | OAuth | App with *Sign In with LinkedIn using OpenID Connect* + *Share on LinkedIn*. Tokens last 60 days; reconnect when prompted. |
-| Facebook + Instagram | OAuth | Meta Business app with Facebook Login for Business and the `pages_*` + `instagram_*` permissions. One login connects every Page you admin and each Page's linked Instagram business account. |
+| Facebook + Instagram | OAuth | Meta Business app with Facebook Login for Business and the `pages_show_list`, `pages_manage_posts`, `pages_read_engagement` and `business_management` permissions. One login connects every Page you admin. To also connect each Page's linked Instagram business account, add `instagram_basic` and `instagram_content_publish` to the app and set `META_INSTAGRAM=true`; Meta refuses the login ("Invalid Scopes") if a permission is requested that the app does not have. |
 | Threads | OAuth | Meta app with the Threads API use case. |
 
 For every OAuth app, the redirect URL is `PUBLIC_URL/auth/<platform>/callback` (`x`, `linkedin`, `facebook`, `threads`). The Accounts page shows the exact URLs.
