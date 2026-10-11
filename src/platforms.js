@@ -204,6 +204,18 @@ const escapeLinkedIn = (s) => s.replace(/[\\|{}@\[\]()<>#*_~]/g, (c) => "\\" + c
 
 const GRAPH = "https://graph.facebook.com/v23.0";
 
+// Permissions asked for when someone connects Facebook. Meta rejects the whole login with
+// "Invalid Scopes" if the app has not been given one of them, so only Page permissions are
+// requested by default. Once your Meta app has the Instagram permissions, turn them on with
+// META_INSTAGRAM=true, or set META_SCOPES to an exact comma-separated list.
+const PAGE_SCOPES = ["pages_show_list", "pages_manage_posts", "pages_read_engagement", "business_management"];
+const INSTAGRAM_SCOPES = ["instagram_basic", "instagram_content_publish"];
+export function metaScopes() {
+  const custom = env("META_SCOPES").split(",").map((x) => x.trim()).filter(Boolean);
+  if (custom.length) return custom;
+  return /^(true|1|yes|on)$/i.test(env("META_INSTAGRAM")) ? [...PAGE_SCOPES, ...INSTAGRAM_SCOPES] : PAGE_SCOPES;
+}
+
 const facebook = {
   label: "Facebook Page",
   limit: 63206,
@@ -215,10 +227,7 @@ const facebook = {
         client_id: env("META_APP_ID"),
         redirect_uri: redirectUri,
         state,
-        scope: [
-          "pages_show_list", "pages_manage_posts", "pages_read_engagement", "business_management",
-          "instagram_basic", "instagram_content_publish",
-        ].join(","),
+        scope: metaScopes().join(","),
       }),
     async exchange(code, redirectUri) {
       const { data: short } = await http(`${GRAPH}/oauth/access_token?` + qs({
