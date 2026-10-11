@@ -19,6 +19,7 @@
     <ul>
       <li><strong>Your account details.</strong> Your name, your email address and your password. The password is stored only as a one-way hash, so nobody, including us, can read it.</li>
       <li><strong>The social accounts you connect.</strong> For each one: its name, handle, profile picture address and platform ID, plus the access token (or, for Bluesky, the app password) that lets SocialSuite post for you. These tokens are encrypted before they are saved. We never see or store the password of your X, LinkedIn, Facebook, Instagram or Threads account; you sign in on the platform's own page.</li>
+      <li><strong>Your image library.</strong> The images you upload or pick from Google Drive, with the name you give each one.</li>
       <li><strong>Your posts.</strong> The text, images, schedule times and target accounts of the posts and drafts you create, and the result of each attempt to publish (links to the published post, or the error).</li>
       <li><strong>A sign-in cookie.</strong> One cookie, <code>ss_session</code>, keeps you signed in for up to 30 days. It is required for the site to work. There are no advertising or analytics cookies and no third-party trackers.</li>
       <li><strong>Your IP address, briefly.</strong> It is held in memory for up to an hour to limit abuse such as password guessing. It is not written to the database. Our hosting provider may keep its own standard access logs.</li>
@@ -39,6 +40,7 @@
       <li><strong>The platforms you connect.</strong> When a post is published, its text and image are sent to the platforms you selected (X, LinkedIn, Facebook, Instagram, Threads, Bluesky or Mastodon). What they do with it is covered by their own privacy policies.</li>
       <li><strong>Anthropic, only if you use "Write with Claude".</strong> The brief or draft you type is sent to Anthropic's API to produce suggestions. Nothing is sent unless you press that button.</li>
       <li><strong>Claude, only if you set up the Claude connector.</strong> If you add your connector link to Claude, it can see your connected account names and your posts, and can schedule, edit or publish posts for you. You can cut this off at any time by generating a new key.</li>
+      <li><strong>Google, only if you use "Add from Google Drive".</strong> You sign in with Google in your browser and choose specific images. Your browser copies only those images into your SocialSuite image library. SocialSuite cannot see the rest of your Drive, and it does not store your Google password or any Google access token.</li>
       <li><strong>The company that hosts this site,</strong> which stores the database on our behalf.</li>
     </ul>
 
@@ -49,6 +51,7 @@
     <ul>
       <li>Your account, connected accounts and posts are kept until you delete them or ask us to delete your account.</li>
       <li>Disconnecting a social account deletes its token from our database straight away. To fully revoke access, also remove SocialSuite from that platform's list of connected apps.</li>
+      <li>Deleting an image from your library deletes the file from our server. The original in your Google Drive, if it came from there, is not touched.</li>
       <li>Deleting a post removes it from SocialSuite. It does not remove anything already published on a platform; delete that on the platform itself.</li>
       <li>Sign-in sessions expire after 30 days, or immediately when you sign out.</li>
     </ul>

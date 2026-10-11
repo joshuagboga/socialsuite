@@ -8,8 +8,9 @@ import { fileURLToPath } from "node:url";
 import { PORT, PUBLIC_URL, UPLOAD_DIR, ALLOW_SIGNUP, TRUST_PROXY, IS_PROD, CLIENT_IP_HEADER } from "./config.js";
 import {
   listAccounts, upsertAccount, deleteAccount, listPosts, getPost, savePost, deletePost, queuePostNow,
-  getMcpKey, rotateMcpKey, publicUser,
+  getMcpKey, rotateMcpKey, publicUser, listImages, getImage, renameImage,
 } from "./db.js";
+import { IMAGE_TYPES, publicImage, saveImage, saveThumb, removeImage, cleanName } from "./images.js";
 import { platforms, platformSummary } from "./platforms.js";
 import { startScheduler, stopScheduler, runSchedulerNow } from "./scheduler.js";
 import { handleMcp } from "./mcp.js";
@@ -38,7 +39,7 @@ app.use(cookieParser());
 // Public page. The operator's name and contact address come from .env so the same code can be
 // hosted by anyone. Review the text in src/pages/privacy.html before you open sign-ups.
 const htmlEscape = (s) => String(s).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
-const PRIVACY_UPDATED = "10 October 2026"; // change this when you change the policy text
+const PRIVACY_UPDATED = "11 October 2026"; // change this when you change the policy text
 const privacyPage = fs.readFileSync(path.join(here, "pages", "privacy.html"), "utf8")
   .replaceAll("{{UPDATED}}", PRIVACY_UPDATED)
   .replaceAll("{{SITE}}", htmlEscape(new URL(PUBLIC_URL).host))
@@ -222,15 +223,44 @@ app.post("/api/posts/:id/publish", wrap(async (req, res) => {
 
 // ---------------------------------------------------------------- media upload
 
-const EXT = { "image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp" };
+// The image library. Uploading from the composer and from the Images page both land here, so every
+// uploaded picture can be reused and can be attached by Claude through the connector.
 const perUser = (req) => req.user.id;
-app.post("/api/upload", rateLimit({ windowMs: 60 * 60_000, max: 60, key: perUser }), express.raw({ type: Object.keys(EXT), limit: "8mb" }), (req, res) => {
-  const ext = EXT[req.headers["content-type"]];
-  if (!ext || !req.body?.length) return res.status(400).json({ error: "Upload a PNG, JPEG, GIF or WebP image (max 8 MB)" });
-  const name = crypto.randomUUID() + ext;
-  fs.writeFileSync(path.join(UPLOAD_DIR, name), req.body);
-  res.json({ url: `${PUBLIC_URL}/uploads/${name}` });
-});
+const uploadLimit = rateLimit({ windowMs: 60 * 60_000, max: 120, key: perUser });
+
+function headerText(req, name) {
+  try { return decodeURIComponent(String(req.headers[name] || "")); } catch { return ""; }
+}
+
+app.get("/api/images", (req, res) => res.json(listImages(req.user.id, { query: req.query.q }).map(publicImage)));
+
+// Body is the raw image. Optional headers: X-File-Name (URL-encoded) and X-Image-Source: drive.
+app.post(["/api/images", "/api/upload"], uploadLimit, express.raw({ type: Object.keys(IMAGE_TYPES), limit: "8mb" }), wrap((req, res) => {
+  const image = publicImage(saveImage({
+    userId: req.user.id, bytes: Buffer.isBuffer(req.body) ? req.body : null, mime: req.headers["content-type"],
+    name: headerText(req, "x-file-name"), source: req.headers["x-image-source"],
+  }));
+  res.json({ url: image.url, image });
+}));
+
+// A small JPEG made in the browser, used for the grid and for Claude's preview.
+app.put("/api/images/:id/thumb", express.raw({ type: "image/jpeg", limit: "300kb" }), wrap((req, res) => {
+  if (!Buffer.isBuffer(req.body) || !req.body.length) throw new Error("Send a JPEG thumbnail (max 300 KB)");
+  const row = saveThumb(req.user.id, req.params.id, req.body);
+  row ? res.json(publicImage(row)) : res.status(404).json({ error: "Not found" });
+}));
+
+app.patch("/api/images/:id", wrap((req, res) => {
+  const name = cleanName(req.body?.name);
+  if (!name) throw new Error("Give the image a name");
+  renameImage(req.user.id, req.params.id, name)
+    ? res.json(publicImage(getImage(req.user.id, req.params.id)))
+    : res.status(404).json({ error: "Not found" });
+}));
+
+app.delete("/api/images/:id", wrap((req, res) => {
+  removeImage(req.user.id, req.params.id) ? res.json({ ok: true }) : res.status(404).json({ error: "Not found" });
+}));
 
 // ---------------------------------------------------------------- Claude writing assistant
 
@@ -252,6 +282,8 @@ app.get("/api/settings", (req, res) => {
   res.json({
     publicUrl: PUBLIC_URL,
     aiEnabled: aiEnabled(),
+    // Both values are public by design: the browser needs them to open Google's file picker.
+    google: { clientId: process.env.GOOGLE_CLIENT_ID || "", apiKey: process.env.GOOGLE_API_KEY || "" },
     mcp: { url: `${PUBLIC_URL}/mcp`, key, urlWithKey: `${PUBLIC_URL}/mcp/${key}` },
     redirectUris: Object.fromEntries(
       Object.entries(platforms).filter(([, p]) => p.oauth).map(([id]) => [id, redirectUri(id)])

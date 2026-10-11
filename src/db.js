@@ -81,6 +81,18 @@ const SCHEMA = `
     PRIMARY KEY (post_id, account_id)
   );
 
+  CREATE TABLE IF NOT EXISTS images (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,              -- what the user (and Claude) call it
+    file TEXT NOT NULL UNIQUE,       -- random file name inside the uploads folder
+    mime TEXT NOT NULL,
+    size INTEGER NOT NULL,           -- bytes
+    source TEXT NOT NULL DEFAULT 'upload', -- upload | drive
+    has_thumb INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -90,6 +102,7 @@ const SCHEMA = `
   CREATE INDEX IF NOT EXISTS idx_posts_user ON posts(user_id, scheduled_at);
   CREATE INDEX IF NOT EXISTS idx_posts_due ON posts(status, next_attempt_at, scheduled_at);
   CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+  CREATE INDEX IF NOT EXISTS idx_images_user ON images(user_id, created_at);
 `;
 
 const SCHEMA_VERSION = 1;
@@ -300,6 +313,39 @@ export function updateAccountCredentials(id, credentials, token_expires_at) {
 export function deleteAccount(userId, id) {
   return db.prepare("DELETE FROM accounts WHERE id = ? AND user_id = ?").run(id, userId).changes > 0;
 }
+
+// ---------------------------------------------------------------- image library
+
+export const countImages = (userId) => db.prepare("SELECT COUNT(*) AS n FROM images WHERE user_id = ?").get(userId).n;
+
+export function addImage({ user_id, name, file, mime, size, source = "upload" }) {
+  const id = newId();
+  db.prepare(
+    "INSERT INTO images (id, user_id, name, file, mime, size, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+  ).run(id, user_id, name, file, mime, size, source, Date.now());
+  return getImage(user_id, id);
+}
+
+/** An image, only if it belongs to this user. */
+export function getImage(userId, id) {
+  return db.prepare("SELECT * FROM images WHERE id = ? AND user_id = ?").get(String(id), userId) ?? null;
+}
+
+/** Newest first. `query` matches any part of the name, ignoring case. */
+export function listImages(userId, { query, limit = 500 } = {}) {
+  const q = String(query ?? "").trim();
+  if (!q) return db.prepare("SELECT * FROM images WHERE user_id = ? ORDER BY created_at DESC LIMIT ?").all(userId, limit);
+  return db.prepare(
+    "SELECT * FROM images WHERE user_id = ? AND name LIKE ? ESCAPE '\\' ORDER BY created_at DESC LIMIT ?"
+  ).all(userId, "%" + q.replace(/[\\%_]/g, "\\$&") + "%", limit);
+}
+
+export function renameImage(userId, id, name) {
+  return db.prepare("UPDATE images SET name = ? WHERE id = ? AND user_id = ?").run(name, String(id), userId).changes > 0;
+}
+
+export const setImageThumb = (id) => db.prepare("UPDATE images SET has_thumb = 1 WHERE id = ?").run(id);
+export const deleteImageRow = (id) => db.prepare("DELETE FROM images WHERE id = ?").run(id);
 
 // ---------------------------------------------------------------- posts
 

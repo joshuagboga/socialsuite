@@ -1,7 +1,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { listAccounts, listPosts, getPost, savePost, deletePost, queuePostNow, getUserByMcpKey } from "./db.js";
+import {
+  listAccounts, listPosts, getPost, savePost, deletePost, queuePostNow, getUserByMcpKey, listImages, getImage,
+} from "./db.js";
+import { publicImage, previewBytes } from "./images.js";
 import { platforms } from "./platforms.js";
 import { runSchedulerNow } from "./scheduler.js";
 import { createLimiter, tooMany } from "./ratelimit.js";
@@ -70,8 +73,11 @@ function buildServer(user) {
       instructions:
         "SocialSuite schedules posts to the user's connected social accounts. Call list_accounts first. " +
         "Times are ISO 8601; always include the user's timezone offset. Respect each platform's character limit " +
-        "and pass per-platform text in `variants` when one post does not fit everywhere. Confirm the final text " +
-        "and time with the user before calling schedule_post or publish_now.",
+        "and pass per-platform text in `variants` when one post does not fit everywhere. To attach a picture, call " +
+        "list_images to see the user's image library, optionally view_image to look at one, then pass that image's " +
+        "`url` as `media_url`. You cannot upload files yourself; if the picture is not in the library, ask the user " +
+        "to add it on the Images page of SocialSuite. Confirm the final text, image and time with the user before " +
+        "calling schedule_post or publish_now.",
     }
   );
 
@@ -123,13 +129,61 @@ function buildServer(user) {
     }
   );
 
+  const describeImage = (row) => {
+    const img = publicImage(row);
+    return {
+      image_id: img.id, name: img.name, url: img.url, type: img.mime, size_kb: Math.round(img.size / 1024),
+      added: new Date(img.created_at).toISOString(), from: img.source === "drive" ? "Google Drive" : "upload",
+    };
+  };
+
+  server.registerTool(
+    "list_images",
+    {
+      title: "List images",
+      description:
+        "List the pictures in the user's SocialSuite image library (uploaded or picked from their Google Drive), " +
+        "newest first. To attach one to a post, pass its `url` as `media_url`.",
+      inputSchema: {
+        query: z.string().optional().describe("Only images whose name contains this text"),
+        limit: z.number().int().min(1).max(200).optional(),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ query, limit = 50 }) => ok(listImages(userId, { query, limit }).map(describeImage))
+  );
+
+  server.registerTool(
+    "view_image",
+    {
+      title: "View image",
+      description: "Look at one image from the library (a small preview) to check it suits the post before attaching it.",
+      inputSchema: { image_id: z.string().describe("image_id from list_images") },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ image_id }) => {
+      const row = getImage(userId, image_id);
+      if (!row) return fail("Image not found. Call list_images.");
+      const preview = previewBytes(row);
+      const info = JSON.stringify(describeImage(row), null, 2);
+      if (!preview) return ok({ ...describeImage(row), note: "No preview is available for this image; go by its name." });
+      return {
+        content: [
+          { type: "image", data: preview.bytes.toString("base64"), mimeType: preview.mime },
+          { type: "text", text: info },
+        ],
+      };
+    }
+  );
+
   const postFields = {
     content: z.string().min(1).describe("Main post text, used for every account without a variant"),
     account_ids: z.array(z.string()).optional().describe("Account ids from list_accounts"),
     platforms: z.array(platformEnum).optional().describe("Post to every connected account on these platforms"),
     variants: z.record(platformEnum, z.string()).optional()
       .describe("Optional per-platform text, e.g. {\"x\": \"short version\"}"),
-    media_url: z.string().url().optional().describe("Public URL of one image to attach (required for Instagram)"),
+    media_url: z.string().url().optional()
+      .describe("URL of one image to attach (required for Instagram). Use the `url` of an image from list_images, or any public image URL."),
   };
 
   server.registerTool(
