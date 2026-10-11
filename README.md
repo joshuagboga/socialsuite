@@ -5,6 +5,7 @@ A self-hosted, multi-user social media scheduler with a built-in Claude connecto
 - **Accounts** for each person: sign up with an email and password, and see only your own connected profiles and posts.
 - **Connect** X, LinkedIn, Facebook Pages, Instagram (business), Threads, Bluesky and Mastodon.
 - **Compose** one post for many accounts, with per-platform text, live character counts and an image.
+- **Image library**: upload pictures or pick them from Google Drive, name them, and attach them to posts.
 - **Schedule** on a calendar. A worker publishes due posts every 15 seconds and retries failures (3 attempts with backoff) without moving the time you picked.
 - **Write with Claude** drafts a version for each selected platform that fits its character limit.
 - **Claude connector (MCP)** lets Claude (claude.ai, Claude Desktop, Claude Code) list accounts and schedule, edit, publish or cancel posts for you.
@@ -83,6 +84,24 @@ For every OAuth app, the redirect URL is `PUBLIC_URL/auth/<platform>/callback` (
 
 **Images:** Instagram, Threads and Facebook fetch images by URL, so `PUBLIC_URL` must be publicly reachable for uploaded images to work on those platforms. Instagram posts need an image.
 
+## Image library
+
+The **Images** page holds the pictures you can attach to posts. Upload them from your device, or click **Add from Google Drive** to pick them from Drive. In the composer, **Choose from library** attaches one. Uploads from the composer land in the library too. Limits: PNG, JPEG, GIF or WebP, 8 MB each, 500 images per user, one image per post.
+
+Images are stored on the server under a random file name and served at a public link, because Facebook, Instagram and Threads fetch images by URL. An image attached to a draft or scheduled post cannot be deleted until it is removed from that post.
+
+### Google Drive
+
+The picker uses Google's `drive.file` permission, so SocialSuite can read only the files a user ticks in Google's own picker, never the rest of their Drive. The browser downloads those images and copies them into the library; the server never receives or stores a Google token. The copy is a snapshot: later changes in Drive are not synced.
+
+One-time setup by whoever runs the server:
+
+1. In the [Google Cloud console](https://console.cloud.google.com/), create a project and enable the **Google Drive API** and the **Google Picker API**.
+2. Configure the OAuth consent screen (External). While it is in Testing, add each Google account that should be able to use it as a test user. Sign-in is requested each time the picker is opened, so the 7-day token expiry of Testing mode does not matter.
+3. Create an **OAuth client ID** of type Web application and add your `PUBLIC_URL` origin (for example `https://social.example.com`) under Authorized JavaScript origins. No redirect URI is needed.
+4. Create an **API key**, restricted to your website (HTTP referrer) and to the Google Picker API.
+5. Set `GOOGLE_CLIENT_ID` and `GOOGLE_API_KEY` and restart. Both are sent to the browser by design; the restrictions in steps 3 and 4 are what protect them.
+
 ## The Claude connector
 
 Open **Claude connector** in the sidebar. It shows your connector URL, which includes a secret key. Each user has their own key, and it only reaches that user's accounts and posts.
@@ -91,7 +110,9 @@ Open **Claude connector** in the sidebar. It shows your connector URL, which inc
 - **Claude Code:** `claude mcp add --transport http socialsuite <PUBLIC_URL>/mcp --header "Authorization: Bearer <key>"`
 - **Claude Desktop:** the page gives you a ready-made `claude_desktop_config.json` snippet.
 
-Tools: `list_accounts`, `list_posts`, `get_post`, `schedule_post`, `publish_now`, `update_post`, `delete_post`. Posts made through Claude are tagged “via Claude” in the dashboard.
+Tools: `list_accounts`, `list_images`, `view_image`, `list_posts`, `get_post`, `schedule_post`, `publish_now`, `update_post`, `delete_post`.
+
+Claude attaches a picture by finding it in your image library (`list_images`, optionally `view_image` to look at a small preview) and passing its link to `schedule_post`. Claude cannot upload files itself, so add the picture on the Images page first and give it a clear name. Posts made through Claude are tagged “via Claude” in the dashboard.
 
 Example prompt: *"Look at my connected accounts, write a launch post for our new dark mode (short for X and Bluesky, longer for LinkedIn) and schedule it for Tuesday at 9am New York time."*
 
@@ -139,6 +160,7 @@ Any machine with Node 22.5+: `npm ci && NODE_ENV=production npm start`, behind a
 
 ```
 src/server.js      Express app: sign-up/login, REST API, OAuth callbacks, uploads
+src/images.js      Image library: storing, naming, thumbnails, deleting
 src/auth.js        Password hashing, sessions, the signed-in-user check
 src/db.js          SQLite schema, upgrades and queries (every user-facing query takes a user id)
 src/secrets.js     AES-256-GCM encryption for stored tokens

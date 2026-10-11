@@ -73,6 +73,7 @@ export function client(baseUrl) {
     return { status: res.status, data, headers: res.headers };
   };
   return {
+    cookie: () => cookie,
     get: (p, h) => call("GET", p, undefined, h),
     post: (p, b = {}, h) => call("POST", p, b, h),
     put: (p, b, h) => call("PUT", p, b, h),
@@ -88,18 +89,25 @@ export function client(baseUrl) {
  */
 export async function startFakeMastodon() {
   const posts = []; // every status-create request received
+  const media = []; // every image upload received
   const behavior = { status: "ok" };
   const server = http.createServer(async (req, res) => {
-    let body = "";
-    for await (const chunk of req) body += chunk;
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const raw = Buffer.concat(chunks);
+    const body = raw.toString();
     const json = (code, data) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); };
     const token = (req.headers.authorization || "").replace("Bearer ", "");
     if (req.url === "/api/v1/accounts/verify_credentials") {
       const name = token.split("-")[0]; // a real instance never echoes the token back
       return json(200, { id: name, username: name, acct: name, display_name: name, avatar: null });
     }
+    if (req.url === "/api/v2/media" && req.method === "POST") {
+      media.push({ token, bytes: raw.length, contentType: req.headers["content-type"], raw });
+      return json(200, { id: `media-${media.length}` });
+    }
     if (req.url === "/api/v1/statuses" && req.method === "POST") {
-      posts.push({ token, text: JSON.parse(body).status, idempotencyKey: req.headers["idempotency-key"] });
+      posts.push({ token, text: JSON.parse(body).status, mediaIds: JSON.parse(body).media_ids, idempotencyKey: req.headers["idempotency-key"] });
       if (behavior.status === "hang") return; // leave the request open
       if (behavior.status === "fail") return json(500, { error: "Fake instance is down" });
       return json(200, { id: String(posts.length), url: `${url}/@${token.split("-")[0]}/${posts.length}` });
@@ -109,7 +117,7 @@ export async function startFakeMastodon() {
   await new Promise((r) => server.listen(0, r));
   const url = `http://localhost:${server.address().port}`;
   return {
-    url, posts, behavior,
+    url, posts, media, behavior,
     close: () => { server.closeAllConnections(); return new Promise((r) => server.close(r)); },
   };
 }

@@ -125,7 +125,7 @@ $("#logout").addEventListener("click", async () => {
 
 // ---------------------------------------------------------------- router
 
-const routes = { calendar: renderCalendar, posts: renderPosts, compose: renderCompose, accounts: renderAccounts, claude: renderClaude };
+const routes = { calendar: renderCalendar, posts: renderPosts, compose: renderCompose, images: renderImages, accounts: renderAccounts, claude: renderClaude };
 
 function parseHash() {
   const [path, query = ""] = location.hash.replace(/^#\/?/, "").split("?");
@@ -294,17 +294,19 @@ async function renderCompose(view, postId, params) {
       $("#media-clear").onclick = () => { draft.media_url = ""; renderMedia(); };
     } else {
       row.innerHTML = `
-        <label class="btn sm" style="flex-direction:row">Upload image<input type="file" id="media-file" accept="image/png,image/jpeg,image/gif,image/webp" hidden /></label>
+        <label class="btn sm" style="flex-direction:row">Upload image<input type="file" id="media-file" accept="${IMAGE_ACCEPT}" hidden /></label>
+        <button class="btn sm" id="media-library" type="button">Choose from library</button>
         <span class="muted small">or</span>
         <input id="media-url" placeholder="Paste a public image URL" style="flex:1;min-width:180px" />`;
       $("#media-file").onchange = async (e) => {
         const file = e.target.files[0];
         if (!file) return;
         try {
-          const { url } = await api("/api/upload", { method: "POST", raw: file, headers: { "Content-Type": file.type } });
-          draft.media_url = url; renderMedia();
+          const image = await uploadImage(file, file.name);
+          draft.media_url = image.url; renderMedia();
         } catch (err) { toast(err.message, true); }
       };
+      $("#media-library").onclick = () => chooseFromLibrary((image) => { draft.media_url = image.url; renderMedia(); });
       $("#media-url").onchange = (e) => { draft.media_url = e.target.value.trim(); renderMedia(); };
     }
   }
@@ -600,6 +602,224 @@ function showPostModal(p) {
   $("#edit-link")?.addEventListener("click", closeModal);
 }
 
+// ---------------------------------------------------------------- image library
+
+const IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+const IMAGE_ACCEPT = IMAGE_TYPES.join(",");
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+const fmtSize = (n) => (n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB");
+
+/** A small JPEG of the image, made in the browser. Used for the grid and for Claude's preview. */
+async function makeThumb(blob) {
+  const bmp = await createImageBitmap(blob);
+  const scale = Math.min(1, 512 / Math.max(bmp.width, bmp.height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(bmp.width * scale));
+  canvas.height = Math.max(1, Math.round(bmp.height * scale));
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#fff"; // transparent PNGs would otherwise turn black as JPEG
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+  return new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.8));
+}
+
+/** Add one image to the library. `source` is "drive" for Google Drive imports. Returns the saved image. */
+async function uploadImage(blob, name, source) {
+  if (!IMAGE_TYPES.includes(blob.type)) throw new Error(`${name || "That file"} is not a PNG, JPEG, GIF or WebP image`);
+  if (blob.size > MAX_IMAGE_BYTES) throw new Error(`${name || "That image"} is larger than 8 MB`);
+  const headers = { "Content-Type": blob.type, "X-File-Name": encodeURIComponent(name || "") };
+  if (source) headers["X-Image-Source"] = source;
+  let { image } = await api("/api/images", { method: "POST", raw: blob, headers });
+  try {
+    const thumb = await makeThumb(blob);
+    if (thumb) image = await api(`/api/images/${image.id}/thumb`, { method: "PUT", raw: thumb, headers: { "Content-Type": "image/jpeg" } });
+  } catch {} // the image is saved; it just has no small preview
+  return image;
+}
+
+const imageTile = (img, actions) => `
+  <div class="img-card" data-id="${img.id}">
+    <div class="img-thumb"><img src="${esc(img.thumb_url || img.url)}" alt="" loading="lazy" /></div>
+    <div class="img-name" title="${esc(img.name)}">${esc(img.name)}</div>
+    <div class="muted small">${fmtSize(img.size)}${img.source === "drive" ? " · Google Drive" : ""}</div>
+    ${actions}
+  </div>`;
+
+/** Modal grid of the library; calls onPick(image) with the one the user clicks. */
+async function chooseFromLibrary(onPick) {
+  const images = await api("/api/images");
+  if (!images.length) {
+    openModal(`<h2>Your image library is empty</h2>
+      <p class="muted">Add pictures on the Images page, then you can pick them here.</p>
+      <div class="row" style="justify-content:flex-end;margin-top:14px"><a class="btn primary" href="#/images" id="go-images">Open Images</a></div>`);
+    $("#go-images").onclick = closeModal;
+    return;
+  }
+  openModal(`<h2>Choose an image</h2>
+    <div class="img-grid pick">${images.map((img) => imageTile(img, "")).join("")}</div>`);
+  $$("#modal-card .img-card").forEach((el) => el.onclick = () => {
+    closeModal();
+    onPick(images.find((i) => i.id === el.dataset.id));
+  });
+}
+
+async function renderImages(view) {
+  state.settings = await api("/api/settings");
+  const images = await api("/api/images");
+  const drive = !!state.settings.google?.clientId;
+  view.innerHTML = `
+    <div class="page-head">
+      <div><h1>Images</h1><span class="muted">Pictures you can attach to posts. Claude can attach these for you by name.</span></div>
+      <div class="row">
+        <label class="btn primary" style="flex-direction:row">Upload images<input type="file" id="img-files" accept="${IMAGE_ACCEPT}" multiple hidden /></label>
+        <button class="btn" id="img-drive">Add from Google Drive</button>
+      </div>
+    </div>
+    <p class="muted small" id="img-status" role="status"></p>
+    ${images.length ? `<div class="img-grid">${images.map((img) => imageTile(img, `
+        <div class="row img-actions">
+          <button class="btn sm" data-rename>Rename</button>
+          <button class="btn sm" data-copy>Copy link</button>
+          <button class="btn sm danger" data-del>Delete</button>
+        </div>`)).join("")}</div>`
+      : `<div class="card empty">No images yet. Upload some from this device${drive ? " or add them from Google Drive" : ""}.<br>
+           Give them clear names, because that is how Claude finds them.</div>`}`;
+
+  const status = (msg) => { $("#img-status").textContent = msg; };
+
+  // Add several images one after another, reporting progress and any that were skipped.
+  async function addAll(items, source) {
+    const problems = [];
+    let done = 0;
+    for (const item of items) {
+      status(`Adding ${done + 1} of ${items.length}…`);
+      try { await uploadImage(await item.blob(), item.name, source); done++; }
+      catch (err) { problems.push(err.message); }
+    }
+    if (problems.length) toast(`Added ${done}. Skipped ${problems.length}: ${problems[0]}`, true);
+    else if (done) toast(`Added ${done} image${done === 1 ? "" : "s"}`);
+    renderImages(view);
+  }
+
+  $("#img-files").onchange = (e) => {
+    const files = [...e.target.files];
+    if (files.length) addAll(files.map((f) => ({ name: f.name, blob: async () => f })));
+  };
+
+  $("#img-drive").onclick = async () => {
+    if (!drive) return showDriveHelp();
+    try {
+      status("Opening Google Drive…");
+      const picked = await pickFromDrive(state.settings.google);
+      status("");
+      if (picked.length) await addAll(picked, "drive");
+    } catch (err) {
+      status("");
+      toast(err.message, true);
+    }
+  };
+
+  $$(".img-card", view).forEach((el) => {
+    const img = images.find((i) => i.id === el.dataset.id);
+    $("[data-rename]", el).onclick = async () => {
+      const name = prompt("Name for this image", img.name);
+      if (name == null || !name.trim() || name.trim() === img.name) return;
+      try { await api(`/api/images/${img.id}`, { method: "PATCH", body: { name } }); renderImages(view); }
+      catch (err) { toast(err.message, true); }
+    };
+    $("[data-copy]", el).onclick = async () => { await navigator.clipboard.writeText(img.url); toast("Link copied"); };
+    $("[data-del]", el).onclick = async () => {
+      if (!confirm(`Delete "${img.name}" from your library?`)) return;
+      try { await api(`/api/images/${img.id}`, { method: "DELETE" }); toast("Deleted"); renderImages(view); }
+      catch (err) { toast(err.message, true); }
+    };
+  });
+}
+
+// ---------------------------------------------------------------- Google Drive picker
+// The browser signs in to Google and opens Google's own file picker. Only the images the user
+// ticks are shared with this app (the "drive.file" permission), and the browser copies them into
+// the SocialSuite library. The server never sees a Google token.
+
+const loadedScripts = {};
+function loadScript(src) {
+  return (loadedScripts[src] ??= new Promise((resolve, reject) => {
+    const el = document.createElement("script");
+    el.src = src; el.async = true;
+    el.onload = resolve;
+    el.onerror = () => { delete loadedScripts[src]; reject(new Error("Could not load Google's sign-in. Check your connection or ad blocker.")); };
+    document.head.append(el);
+  }));
+}
+
+function googleToken(clientId) {
+  return new Promise((resolve, reject) => {
+    const client = google.accounts.oauth2.initTokenClient({
+      client_id: clientId,
+      scope: "https://www.googleapis.com/auth/drive.file",
+      callback: (r) => (r.error ? reject(new Error(r.error_description || "Google sign-in was not completed")) : resolve(r.access_token)),
+      error_callback: (e) => reject(new Error(e.type === "popup_closed" ? "Google sign-in was closed" : e.message || "Google sign-in failed")),
+    });
+    client.requestAccessToken();
+  });
+}
+
+/** Opens the picker. Resolves to [{ name, blob() }] for the images the user chose ([] if cancelled). */
+async function pickFromDrive({ clientId, apiKey }) {
+  await Promise.all([loadScript("https://accounts.google.com/gsi/client"), loadScript("https://apis.google.com/js/api.js")]);
+  await new Promise((resolve) => gapi.load("picker", resolve));
+  const token = await googleToken(clientId);
+
+  const docs = await new Promise((resolve) => {
+    const view = new google.picker.DocsView(google.picker.ViewId.DOCS_IMAGES)
+      .setIncludeFolders(true).setMimeTypes(IMAGE_ACCEPT);
+    const builder = new google.picker.PickerBuilder()
+      .addView(view)
+      .enableFeature(google.picker.Feature.MULTISELECT_ENABLED)
+      .setOAuthToken(token)
+      .setAppId(clientId.split("-")[0]) // the project number; lets "drive.file" cover the picked files
+      .setTitle("Choose images to add to SocialSuite")
+      .setCallback((data) => {
+        if (data.action === google.picker.Action.PICKED) resolve(data.docs || []);
+        else if (data.action === google.picker.Action.CANCEL) resolve([]);
+      });
+    if (apiKey) builder.setDeveloperKey(apiKey);
+    builder.build().setVisible(true);
+  });
+
+  return docs.map((doc) => ({
+    name: doc.name,
+    async blob() {
+      const res = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(doc.id)}?alt=media`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) throw new Error(`Could not download ${doc.name} from Google Drive (${res.status})`);
+      const data = await res.blob();
+      // Drive reports the real type on the file; the download response is not always labelled.
+      const type = IMAGE_TYPES.includes(data.type) ? data.type : doc.mimeType;
+      return new Blob([data], { type });
+    },
+  }));
+}
+
+function showDriveHelp() {
+  const origin = new URL(state.settings.publicUrl).origin;
+  openModal(`
+    <h2>Set up Google Drive</h2>
+    <div class="stack">
+      <p>Google requires the owner of this site to register it once. After that, anyone using it can add images from their own Drive.</p>
+      <ol class="steps">
+        <li>In the <a href="https://console.cloud.google.com/" target="_blank" rel="noopener">Google Cloud console</a>, create a project and enable the <strong>Google Drive API</strong> and the <strong>Google Picker API</strong>.</li>
+        <li>Set up the OAuth consent screen and create an <strong>OAuth client ID</strong> of type Web application. Add this under Authorized JavaScript origins:
+          <div class="copy-field" style="margin-top:6px"><input readonly value="${esc(origin)}" /></div></li>
+        <li>Create an <strong>API key</strong> and restrict it to this website and the Google Picker API.</li>
+        <li>Set <code>GOOGLE_CLIENT_ID</code> and <code>GOOGLE_API_KEY</code> in the server's environment and restart it.</li>
+      </ol>
+      <div class="row" style="justify-content:flex-end"><button class="btn" id="close-help">Close</button></div>
+    </div>`);
+  $("#close-help").onclick = closeModal;
+}
+
 // ---------------------------------------------------------------- accounts
 
 async function renderAccounts(view, _arg, params) {
@@ -765,6 +985,7 @@ async function renderClaude(view) {
         <div class="grid-cards">
           ${[
             ["list_accounts", "See connected accounts and character limits"],
+            ["list_images / view_image", "Find a picture in your image library and attach it"],
             ["schedule_post", "Schedule or draft a post, with per-platform versions"],
             ["publish_now", "Post immediately, or push a scheduled post out now"],
             ["list_posts / get_post", "Review your queue, results and errors"],

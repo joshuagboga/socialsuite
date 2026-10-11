@@ -198,6 +198,16 @@
   .cal-post.published { @apply border-ok bg-ok/12; }
   .cal-post.failed, .cal-post.partial { @apply border-danger bg-danger/12; }
 
+  /* ---------- image library ---------- */
+  .img-grid { @apply grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-3; }
+  .img-grid.pick { @apply max-h-[60vh] grid-cols-[repeat(auto-fill,minmax(120px,1fr))] overflow-auto; }
+  .img-card { @apply flex min-w-0 flex-col gap-1.5 rounded-xl border border-line bg-surface p-2.5 shadow-sm; }
+  .img-grid.pick .img-card { @apply cursor-pointer hover:border-accent; }
+  .img-thumb { @apply aspect-square overflow-hidden rounded-lg bg-surface-2; }
+  .img-thumb img { @apply size-full object-cover; }
+  .img-name { @apply truncate font-medium; }
+  .img-actions { @apply mt-1 gap-1.5; }
+
   /* ---------- accounts ---------- */
   .grid-cards { @apply grid grid-cols-[repeat(auto-fill,minmax(250px,1fr))] gap-3; }
   .acct-row { @apply flex items-center gap-3 border-b border-line py-3 last:border-b-0; }
