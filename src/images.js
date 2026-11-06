@@ -10,6 +10,18 @@ import { addImage, countImages, getImage, deleteImageRow, setImageThumb, db } fr
 
 export const IMAGE_TYPES = { "image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp" };
 export const MAX_IMAGES = 500;
+export const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+
+/** The real type of an image from its first bytes, whatever its name says. null if it is not PNG/JPEG/GIF/WebP. */
+export function sniffImageType(bytes) {
+  if (!bytes || bytes.length < 12) return null;
+  const ascii = (start, end) => bytes.toString("latin1", start, end);
+  if (bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return "image/png";
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
+  if (ascii(0, 6) === "GIF87a" || ascii(0, 6) === "GIF89a") return "image/gif";
+  if (ascii(0, 4) === "RIFF" && ascii(8, 12) === "WEBP") return "image/webp";
+  return null;
+}
 const THUMB = ".thumb.jpg";
 
 export const imageUrl = (file) => `${PUBLIC_URL}/uploads/${file}`;

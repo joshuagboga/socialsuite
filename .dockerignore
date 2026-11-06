@@ -4,4 +4,5 @@ data
 .git
 test
 public/styles.css
+public/vendor/
 *.md

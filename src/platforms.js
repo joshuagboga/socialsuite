@@ -6,6 +6,9 @@
 //   publish(account, { text, media, idempotencyKey }) -> { remote_id, remote_url }
 // `media` is { url, bytes, mime } when the post has an image, else null.
 // `idempotencyKey` is stable for a given post + account + text; pass it on where the platform supports one.
+// X also takes { thread, threadIds, onThreadProgress } to post a thread (see x.publish).
+
+import { xLength } from "./xcount.js";
 
 const env = (k) => process.env[k] || "";
 
@@ -46,9 +49,13 @@ const qs = (o) => new URLSearchParams(o).toString();
 
 // ---------------------------------------------------------------- X (Twitter)
 
+// X_API_URL points the API calls somewhere else (a fake X in the tests, or a proxy).
+const X_API = () => (env("X_API_URL") || "https://api.x.com").replace(/\/$/, "");
+
 const x = {
   label: "X (Twitter)",
   limit: 280,
+  premiumLimit: 25000, // accounts marked Premium on the Accounts page
   kind: "oauth",
   configured: () => !!env("X_CLIENT_ID"),
   oauth: {
@@ -68,7 +75,7 @@ const x = {
         grant_type: "authorization_code", code, redirect_uri: redirectUri,
         code_verifier: verifier, client_id: env("X_CLIENT_ID"),
       });
-      const { data } = await http("https://api.x.com/2/users/me?user.fields=profile_image_url", {
+      const { data } = await http(`${X_API()}/2/users/me?user.fields=profile_image_url`, {
         headers: { Authorization: `Bearer ${tok.access_token}` },
       });
       return [{
@@ -89,19 +96,40 @@ const x = {
       token_expires_at: Date.now() + tok.expires_in * 1000,
     };
   },
-  async publish(account, { text, media }) {
+  /**
+   * A single post, or a thread: `text` first (with the image), then each item of `thread` as a
+   * reply to the post before it. `threadIds` are posts a previous attempt already sent; they are
+   * skipped, so a retry carries on where it stopped. `onThreadProgress(ids)` runs after each post
+   * goes out, so the ids can be saved before the next request.
+   */
+  async publish(account, { text, media, thread = [], threadIds = [], onThreadProgress }) {
     const auth = { Authorization: `Bearer ${account.credentials.access_token}` };
-    const payload = { text };
-    if (media) {
-      const fd = new FormData();
-      fd.append("media", new Blob([media.bytes], { type: media.mime }), "upload");
-      fd.append("media_category", "tweet_image");
-      const { data } = await http("https://api.x.com/2/media/upload", { method: "POST", headers: auth, body: fd });
-      payload.media = { media_ids: [data.data.id] };
-    }
-    const { data } = await http("https://api.x.com/2/tweets", { method: "POST", headers: auth, json: payload });
     const handle = (account.handle || "").replace(/^@/, "") || "i";
-    return { remote_id: data.data.id, remote_url: `https://x.com/${handle}/status/${data.data.id}` };
+    const postUrl = (id) => `https://x.com/${handle}/status/${id}`;
+    const items = [text, ...thread];
+    const ids = threadIds.slice(0, items.length);
+
+    for (let i = ids.length; i < items.length; i++) {
+      const payload = { text: items[i] };
+      try {
+        if (i === 0 && media) {
+          const fd = new FormData();
+          fd.append("media", new Blob([media.bytes], { type: media.mime }), "upload");
+          fd.append("media_category", "tweet_image");
+          const { data } = await http(`${X_API()}/2/media/upload`, { method: "POST", headers: auth, body: fd });
+          payload.media = { media_ids: [data.data.id] };
+        }
+        if (i > 0) payload.reply = { in_reply_to_tweet_id: ids[i - 1] };
+        const { data } = await http(`${X_API()}/2/tweets`, { method: "POST", headers: auth, json: payload });
+        ids.push(data.data.id);
+      } catch (err) {
+        if (items.length === 1) throw err;
+        const sent = i ? ` Posts 1-${i} are live (${postUrl(ids[0])}) and will not be posted again on retry.` : "";
+        throw new PlatformError(`Thread post ${i + 1} of ${items.length} failed: ${String(err.message).replace(/\.$/, "")}.${sent}`);
+      }
+      if (items.length > 1) onThreadProgress?.([...ids]);
+    }
+    return { remote_id: ids[0], remote_url: postUrl(ids[0]) };
   },
 };
 
@@ -110,7 +138,7 @@ async function xToken(form) {
   if (env("X_CLIENT_SECRET")) {
     headers.Authorization = "Basic " + Buffer.from(`${env("X_CLIENT_ID")}:${env("X_CLIENT_SECRET")}`).toString("base64");
   }
-  const { data } = await http("https://api.x.com/2/oauth2/token", { method: "POST", headers, form });
+  const { data } = await http(`${X_API()}/2/oauth2/token`, { method: "POST", headers, form });
   return data;
 }
 
@@ -502,9 +530,20 @@ const mastodon = {
 export const platforms = { x, linkedin, facebook, instagram, threads, bluesky, mastodon };
 export { PlatformError };
 
+/** The character limit for one account: X Premium accounts get the long-post limit. */
+export function charLimit(account) {
+  const p = platforms[account.platform];
+  return account.premium && p.premiumLimit ? p.premiumLimit : p.limit;
+}
+
+/** Characters as the platform counts them: X weighs emoji and links (see xcount.js). */
+export function countChars(platform, text, limit) {
+  return platform === "x" ? xLength(text, limit) : [...text].length;
+}
+
 export function platformSummary() {
   return Object.entries(platforms).map(([id, p]) => ({
-    id, label: p.label, limit: p.limit, kind: p.kind, configured: p.configured(),
+    id, label: p.label, limit: p.limit, premiumLimit: p.premiumLimit ?? null, kind: p.kind, configured: p.configured(),
     requiresMedia: !!p.requiresMedia, connectVia: p.connectVia ?? null, fields: p.fields ?? null,
   }));
 }

@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { PORT, PUBLIC_URL, UPLOAD_DIR, ALLOW_SIGNUP, TRUST_PROXY, IS_PROD, CLIENT_IP_HEADER } from "./config.js";
 import {
   listAccounts, upsertAccount, deleteAccount, listPosts, getPost, savePost, deletePost, queuePostNow,
-  getMcpKey, rotateMcpKey, publicUser, listImages, getImage, renameImage,
+  getMcpKey, rotateMcpKey, publicUser, listImages, getImage, renameImage, setAccountPremium,
 } from "./db.js";
 import { IMAGE_TYPES, publicImage, saveImage, saveThumb, removeImage, cleanName } from "./images.js";
 import { platforms, platformSummary } from "./platforms.js";
@@ -54,7 +54,8 @@ app.get("/healthz", (req, res) => res.json({ ok: true }));
 
 // ---------------------------------------------------------------- MCP (Claude connector)
 // Mounted before the session check: it authenticates with each user's own connector key.
-app.all(["/mcp", "/mcp/:key"], express.json({ limit: "2mb" }), (req, res, next) =>
+// 12 MB, because upload_image sends a picture of up to 8 MB as base64 (about 11 MB).
+app.all(["/mcp", "/mcp/:key"], express.json({ limit: "12mb" }), (req, res, next) =>
   handleMcp(req, res).catch(next)
 );
 
@@ -138,6 +139,16 @@ app.delete("/api/accounts/:id", (req, res) => {
   deleteAccount(req.user.id, req.params.id) ? res.json({ ok: true }) : res.status(404).json({ error: "Not found" });
 });
 
+// X Premium allows long posts, and X does not tell apps whether an account has it, so the user says.
+app.patch("/api/accounts/:id", wrap((req, res) => {
+  const account = listAccounts(req.user.id).find((a) => a.id === req.params.id);
+  if (!account) return res.status(404).json({ error: "Not found" });
+  if (account.platform !== "x") throw new Error("Only X accounts have a Premium setting");
+  if (typeof req.body?.premium !== "boolean") throw new Error("Send { premium: true } or { premium: false }");
+  setAccountPremium(req.user.id, account.id, req.body.premium);
+  res.json(listAccounts(req.user.id).find((a) => a.id === account.id));
+}));
+
 app.post("/api/accounts/connect/:platform", wrap(async (req, res) => {
   const p = platforms[req.params.platform];
   if (!p?.connect) throw new Error("This platform connects through OAuth");
@@ -187,14 +198,17 @@ app.get("/auth/:platform/callback", async (req, res) => {
 // ---------------------------------------------------------------- posts
 
 function postInput(body) {
-  const { content, media_url, scheduled_at, targets, draft } = body || {};
+  const { content, media_url, scheduled_at, targets, draft, thread = [] } = body || {};
   if (!content?.trim()) throw new Error("Post text is empty");
   if (!Array.isArray(targets) || !targets.length) throw new Error("Pick at least one account");
+  if (!Array.isArray(thread) || thread.some((t) => typeof t !== "string" || !t.trim())) {
+    throw new Error("Every post in the X thread needs text");
+  }
   const when = scheduled_at ? Date.parse(scheduled_at) : null;
   if (scheduled_at && Number.isNaN(when)) throw new Error("Invalid schedule time");
   if (!draft && !when) throw new Error("Pick a time, or save as draft");
   if (!draft && when < Date.now() - 60_000) throw new Error("That time is in the past");
-  return { content, media_url: media_url || null, scheduled_at: when, targets, draft: !!draft };
+  return { content, media_url: media_url || null, scheduled_at: when, targets, thread, draft: !!draft };
 }
 
 app.get("/api/posts", (req, res) => {

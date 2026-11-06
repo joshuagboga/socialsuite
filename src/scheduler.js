@@ -98,6 +98,13 @@ export async function publishPost(postId) {
         // Stable per post + account + text, so platforms that support idempotency keys (Mastodon)
         // return the original post instead of creating a duplicate.
         idempotencyKey: crypto.createHash("sha256").update(`${postId}:${target.account_id}:${text}`).digest("hex"),
+        // Threads are X only. Each post's id is saved as soon as it is live, so a retry
+        // replies to the last one that went out instead of posting the thread again.
+        ...(account.platform === "x" && post.thread.length ? {
+          thread: post.thread,
+          threadIds: target.thread_ids,
+          onThreadProgress: (ids) => updateTarget(postId, target.account_id, { thread_ids: JSON.stringify(ids) }),
+        } : {}),
       });
       updateTarget(postId, target.account_id, {
         status: "published", attempts, error: null, published_at: Date.now(),

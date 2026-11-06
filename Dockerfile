@@ -1,11 +1,11 @@
-# ---- build: compile the Tailwind CSS ----
+# ---- build: compile the Tailwind CSS and the composer's X character counter ----
 FROM node:22-slim AS build
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci
 COPY src ./src
 COPY public ./public
-RUN npm run build:css
+RUN npm run build:css && npm run build:js
 
 # ---- run: production dependencies only ----
 FROM node:22-slim
