@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { startServer, startFakeMastodon, client, tmpDir } from "./helpers.js";
+import { startServer, startFakeMastodon, client, connectMastodon, inAnHour, tmpDir } from "./helpers.js";
 
 // The schema exactly as the first release created it.
 const OLD_SCHEMA = `
@@ -75,4 +75,33 @@ test("an old single-user database is upgraded, encrypted, and handed to the firs
   const raw = fs.readdirSync(dataDir).filter((f) => f.startsWith("socialsuite.db"))
     .map((f) => fs.readFileSync(path.join(dataDir, f)).toString("latin1")).join("");
   assert.ok(!raw.includes("legacy-plain-token-77"));
+});
+
+test("a database from before X Premium and threads gets the new columns, and keeps its data", async () => {
+  const fake = await startFakeMastodon();
+  let app = await startServer();
+  try {
+    const c = client(app.url);
+    await c.signUp("columns@example.com");
+    const account = await connectMastodon(c, fake, "columns");
+    const post = (await c.post("/api/posts", { content: "from the old version", scheduled_at: inAnHour(), targets: [{ account_id: account }] })).data;
+    await app.stop();
+
+    // Make it look like the previous release made it.
+    const old = new DatabaseSync(path.join(app.dataDir, "socialsuite.db"));
+    old.exec("ALTER TABLE accounts DROP COLUMN premium; ALTER TABLE posts DROP COLUMN thread; ALTER TABLE post_targets DROP COLUMN thread_ids;");
+    old.close();
+
+    app = await startServer({ dataDir: app.dataDir, env: { ENCRYPTION_KEY: app.encryptionKey } });
+    const c2 = client(app.url);
+    await c2.logIn("columns@example.com");
+    assert.equal((await c2.get("/api/accounts")).data[0].premium, false);
+    const after = (await c2.get(`/api/posts/${post.id}`)).data;
+    assert.equal(after.content, "from the old version");
+    assert.deepEqual(after.thread, []);
+    assert.deepEqual(after.targets[0].thread_ids, []);
+    assert.equal((await c2.post(`/api/posts/${post.id}/publish`)).data.status, "published");
+  } finally {
+    await app.stop(); await fake.close();
+  }
 });

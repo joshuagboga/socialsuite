@@ -31,6 +31,7 @@ const accountsTable = (name) => `
     avatar_url TEXT,
     credentials TEXT NOT NULL,       -- encrypted JSON: tokens, ids, instance urls (see secrets.js)
     token_expires_at INTEGER,        -- ms epoch, null if non-expiring
+    premium INTEGER NOT NULL DEFAULT 0, -- X Premium: long posts allowed (see charLimit in platforms.js)
     created_at INTEGER NOT NULL,
     UNIQUE (user_id, platform, external_id)
   );`;
@@ -65,7 +66,8 @@ const SCHEMA = `
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
-    next_attempt_at INTEGER          -- ms epoch of the next retry; null = use scheduled_at
+    next_attempt_at INTEGER,         -- ms epoch of the next retry; null = use scheduled_at
+    thread TEXT                      -- JSON array: X posts that follow the content as replies; null = none
   );
 
   CREATE TABLE IF NOT EXISTS post_targets (
@@ -78,6 +80,7 @@ const SCHEMA = `
     remote_url TEXT,
     error TEXT,
     published_at INTEGER,
+    thread_ids TEXT,                 -- JSON array of X post ids already sent for a thread, so a retry carries on from there
     PRIMARY KEY (post_id, account_id)
   );
 
@@ -139,6 +142,17 @@ const version = db.prepare("PRAGMA user_version").get().user_version;
 const hasOldTables = !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'accounts'").get();
 if (version === 0 && hasOldTables) migrateFromSingleUser();
 db.exec(SCHEMA);
+
+// Columns added after a release. CREATE TABLE IF NOT EXISTS leaves existing tables alone,
+// so add them to databases made before they existed.
+function addColumnIfMissing(table, column, definition) {
+  const has = db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column);
+  if (!has) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+}
+addColumnIfMissing("accounts", "premium", "INTEGER NOT NULL DEFAULT 0");
+addColumnIfMissing("posts", "thread", "TEXT");
+addColumnIfMissing("post_targets", "thread_ids", "TEXT");
+
 db.exec(`PRAGMA user_version = ${SCHEMA_VERSION};`);
 db.exec("PRAGMA foreign_keys = ON;");
 
@@ -271,7 +285,7 @@ export function getUserByMcpKey(key) {
 export function publicAccount(row) {
   if (!row) return null;
   const { credentials, user_id, ...rest } = row;
-  return rest;
+  return { ...rest, premium: !!rest.premium };
 }
 
 export function listAccounts(userId) {
@@ -308,6 +322,12 @@ export function updateAccountCredentials(id, credentials, token_expires_at) {
   db.prepare("UPDATE accounts SET credentials = ?, token_expires_at = ? WHERE id = ?").run(
     encrypt(JSON.stringify(credentials), id), token_expires_at ?? null, id
   );
+}
+
+/** Turn X Premium on or off for one of this user's X accounts. */
+export function setAccountPremium(userId, accountId, premium) {
+  return db.prepare("UPDATE accounts SET premium = ? WHERE id = ? AND user_id = ? AND platform = 'x'")
+    .run(premium ? 1 : 0, String(accountId), userId).changes > 0;
 }
 
 export function deleteAccount(userId, id) {
@@ -349,6 +369,8 @@ export const deleteImageRow = (id) => db.prepare("DELETE FROM images WHERE id = 
 
 // ---------------------------------------------------------------- posts
 
+const parseList = (json) => (json ? JSON.parse(json) : []);
+
 function hydratePost(row) {
   if (!row) return null;
   const targets = db
@@ -356,8 +378,9 @@ function hydratePost(row) {
       `SELECT t.*, a.platform, a.name AS account_name, a.handle AS account_handle
        FROM post_targets t JOIN accounts a ON a.id = t.account_id WHERE t.post_id = ?`
     )
-    .all(row.id);
-  return { ...row, targets };
+    .all(row.id)
+    .map((t) => ({ ...t, thread_ids: parseList(t.thread_ids) }));
+  return { ...row, thread: parseList(row.thread), targets };
 }
 
 /** A post, only if it belongs to this user. */
@@ -384,13 +407,15 @@ export function listPosts(userId, { status, from, to, limit = 200 } = {}) {
 /**
  * targets: [{ account_id, content_override? }]
  * scheduled_at: ms epoch, or null for a draft.
+ * thread: X posts to send after `content`, each replying to the one before. Other platforms ignore it.
  * Pass `id` to edit an existing post. Both the post and every target account must belong to user_id.
  */
-export function savePost({ user_id, id, content, media_url, scheduled_at, targets, source = "web", draft = false }) {
+export function savePost({ user_id, id, content, media_url, scheduled_at, targets, thread, source = "web", draft = false }) {
   if (!user_id) throw new Error("savePost needs a user_id");
   const now = Date.now();
   const status = draft || scheduled_at == null ? "draft" : "scheduled";
   const postId = id ?? newId();
+  const threadJson = thread?.length ? JSON.stringify(thread) : null;
 
   transaction(() => {
     if (id) {
@@ -400,15 +425,15 @@ export function savePost({ user_id, id, content, media_url, scheduled_at, target
         throw new Error(`Cannot edit a post that is ${existing.status}`);
       }
       db.prepare(
-        `UPDATE posts SET content = ?, media_url = ?, scheduled_at = ?, next_attempt_at = NULL, status = ?, updated_at = ?
+        `UPDATE posts SET content = ?, media_url = ?, scheduled_at = ?, thread = ?, next_attempt_at = NULL, status = ?, updated_at = ?
          WHERE id = ?`
-      ).run(content, media_url ?? null, scheduled_at ?? null, status, now, id);
+      ).run(content, media_url ?? null, scheduled_at ?? null, threadJson, status, now, id);
       db.prepare("DELETE FROM post_targets WHERE post_id = ?").run(id);
     } else {
       db.prepare(
-        `INSERT INTO posts (id, user_id, content, media_url, scheduled_at, status, source, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(postId, user_id, content, media_url ?? null, scheduled_at ?? null, status, source, now, now);
+        `INSERT INTO posts (id, user_id, content, media_url, scheduled_at, thread, status, source, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(postId, user_id, content, media_url ?? null, scheduled_at ?? null, threadJson, status, source, now, now);
     }
     const owns = db.prepare("SELECT 1 FROM accounts WHERE id = ? AND user_id = ?");
     const ins = db.prepare("INSERT INTO post_targets (post_id, account_id, content_override) VALUES (?, ?, ?)");

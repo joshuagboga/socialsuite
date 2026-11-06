@@ -68,6 +68,7 @@ Styles are written with Tailwind CSS v4 in `src/styles/input.css` and compiled b
 - `npm start` builds the CSS automatically before starting.
 - `npm run dev` rebuilds CSS and restarts the server whenever you change something.
 - `npm run build:css` builds it once.
+- `npm run build:js` bundles the composer's X character counter (`src/xcount.js`) into `public/vendor/`. `npm start`, `npm run dev` and the Docker image run it for you.
 
 ## Connecting accounts
 
@@ -110,9 +111,11 @@ Open **Claude connector** in the sidebar. It shows your connector URL, which inc
 - **Claude Code:** `claude mcp add --transport http socialsuite <PUBLIC_URL>/mcp --header "Authorization: Bearer <key>"`
 - **Claude Desktop:** the page gives you a ready-made `claude_desktop_config.json` snippet.
 
-Tools: `list_accounts`, `list_images`, `view_image`, `list_posts`, `get_post`, `schedule_post`, `publish_now`, `update_post`, `delete_post`.
+Tools: `list_accounts`, `list_images`, `view_image`, `upload_image`, `list_posts`, `get_post`, `schedule_post`, `publish_now`, `update_post`, `delete_post`.
 
-Claude attaches a picture by finding it in your image library (`list_images`, optionally `view_image` to look at a small preview) and passing its link to `schedule_post`. Claude cannot upload files itself, so add the picture on the Images page first and give it a clear name. Posts made through Claude are tagged “via Claude” in the dashboard.
+Claude attaches a picture by finding it in your image library (`list_images`, optionally `view_image` to look at a small preview) and passing its link to `schedule_post`. If the picture is not in the library yet, for example one you shared in the chat, Claude adds it with `upload_image` (PNG, JPEG, GIF or WebP, up to 8 MB; the file's real type is checked, not its name). Posts made through Claude are tagged “via Claude” in the dashboard.
+
+**X Premium and threads:** X does not tell apps whether an account has Premium, so tick **Premium** next to the X account on the Accounts page. Posts to that account can then be up to 25,000 characters instead of 280. X characters are counted the way X counts them (with `twitter-text`): most emoji count as 2 and every link as 23. A post can also be an X thread: the main text is the first post and each thread item is posted as a reply to the one before. If one item fails, the ones already posted are remembered, so a retry carries on from there instead of posting them again. Other platforms get only the main text.
 
 Example prompt: *"Look at my connected accounts, write a launch post for our new dark mode (short for X and Bluesky, longer for LinkedIn) and schedule it for Tuesday at 9am New York time."*
 

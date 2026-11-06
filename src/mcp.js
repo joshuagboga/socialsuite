@@ -4,8 +4,8 @@ import { z } from "zod";
 import {
   listAccounts, listPosts, getPost, savePost, deletePost, queuePostNow, getUserByMcpKey, listImages, getImage,
 } from "./db.js";
-import { publicImage, previewBytes } from "./images.js";
-import { platforms } from "./platforms.js";
+import { publicImage, previewBytes, saveImage, sniffImageType, MAX_IMAGE_BYTES } from "./images.js";
+import { platforms, charLimit, countChars } from "./platforms.js";
 import { runSchedulerNow } from "./scheduler.js";
 import { createLimiter, tooMany } from "./ratelimit.js";
 
@@ -21,10 +21,12 @@ function summarizePost(p) {
     status: p.status,
     scheduled_at: p.scheduled_at ? new Date(p.scheduled_at).toISOString() : null,
     content: p.content,
+    thread: p.thread,
     media_url: p.media_url,
     targets: p.targets.map((t) => ({
       account_id: t.account_id, platform: t.platform, account: t.account_handle || t.account_name,
       status: t.status, content_override: t.content_override, url: t.remote_url, error: t.error,
+      ...(t.platform === "x" && p.thread.length ? { thread_posts_sent: t.thread_ids.length } : {}),
     })),
   };
 }
@@ -36,7 +38,7 @@ function parseWhen(when) {
   return ms;
 }
 
-/** Resolve account ids and/or platform names to concrete account ids. */
+/** Resolve account ids and/or platform names to the user's accounts. */
 function resolveTargets(userId, account_ids = [], platformNames = []) {
   const accounts = listAccounts(userId);
   const ids = new Set(account_ids);
@@ -49,21 +51,45 @@ function resolveTargets(userId, account_ids = [], platformNames = []) {
     matches.forEach((a) => ids.add(a.id));
   }
   if (!ids.size) throw new Error("Choose at least one account (account_ids) or platform (platforms).");
-  return [...ids].map((id) => ({ id, platform: accounts.find((a) => a.id === id).platform }));
+  return [...ids].map((id) => accounts.find((a) => a.id === id));
 }
 
-function checkLimits(targets, content, variants, media_url) {
+/** Every reason the post cannot go out as written. Limits are per account (X Premium allows long posts). */
+function checkLimits(targets, content, variants, media_url, thread = []) {
   const problems = [];
+  const tooLong = (account, text, what) => {
+    const limit = charLimit(account), n = countChars(account.platform, text, limit);
+    if (n > limit) problems.push(`${what}: ${n}/${limit} characters`);
+  };
   for (const t of targets) {
-    const text = variants?.[t.platform] || content;
     const p = platforms[t.platform];
-    if ([...text].length > p.limit) problems.push(`${p.label}: ${[...text].length}/${p.limit} characters`);
+    const label = `${p.label} ${t.handle || t.name}`;
+    tooLong(t, variants?.[t.platform] || content, thread.length && t.platform === "x" ? `${label}, thread post 1` : label);
+    if (t.platform === "x") thread.forEach((item, i) => tooLong(t, item, `${label}, thread post ${i + 2}`));
     if (p.requiresMedia && !media_url) problems.push(`${p.label}: needs media_url (an image)`);
+  }
+  if (thread.length && !targets.some((t) => t.platform === "x")) {
+    problems.push("thread is only posted to X. Add an X account, or leave thread out.");
   }
   return problems;
 }
 
+/** Base64 (optionally a data: URL) to bytes, refusing anything that is not clean base64 or is too big. */
+function decodeBase64(input) {
+  const b64 = String(input ?? "").replace(/^data:[^,]*;base64,/i, "").replace(/\s+/g, "");
+  if (!b64) throw new Error("data_base64 is empty.");
+  if (!/^[A-Za-z0-9+/_-]+={0,2}$/.test(b64)) throw new Error("data_base64 is not valid base64.");
+  const tooBig = () => new Error(`The image is over ${MAX_IMAGE_BYTES / 1024 / 1024} MB. Use a smaller or more compressed picture.`);
+  if (Math.floor((b64.length * 3) / 4) - 2 > MAX_IMAGE_BYTES) throw tooBig(); // before decoding a huge string
+  const bytes = Buffer.from(b64, "base64");
+  if (!bytes.length) throw new Error("data_base64 is empty.");
+  if (bytes.length > MAX_IMAGE_BYTES) throw tooBig();
+  return bytes;
+}
+
 const platformEnum = z.enum(Object.keys(platforms));
+const threadField = z.array(z.string().min(1)).max(25)
+  .describe("X only: the posts that follow `content`, in order. Each is posted as a reply to the one before. Other platforms get only `content`.");
 
 function buildServer(user) {
   const userId = user.id;
@@ -75,9 +101,11 @@ function buildServer(user) {
         "Times are ISO 8601; always include the user's timezone offset. Respect each platform's character limit " +
         "and pass per-platform text in `variants` when one post does not fit everywhere. To attach a picture, call " +
         "list_images to see the user's image library, optionally view_image to look at one, then pass that image's " +
-        "`url` as `media_url`. You cannot upload files yourself; if the picture is not in the library, ask the user " +
-        "to add it on the Images page of SocialSuite. Confirm the final text, image and time with the user before " +
-        "calling schedule_post or publish_now.",
+        "`url` as `media_url`. If the picture is not in the library yet (for example one the user gave you in the " +
+        "chat, or one you made), add it with upload_image and use the `url` it returns. On X, emoji count as 2 " +
+        "characters and every link as 23, and an account with X Premium has a char_limit of 25000. To post a thread " +
+        "on X, put the first post in `content` and the posts that follow in `thread`. Confirm the final text, image " +
+        "and time with the user before calling schedule_post or publish_now.",
     }
   );
 
@@ -85,14 +113,15 @@ function buildServer(user) {
     "list_accounts",
     {
       title: "List connected accounts",
-      description: "List the social media accounts connected to SocialSuite, with each platform's character limit.",
+      description: "List the social media accounts connected to SocialSuite, with each account's character limit (higher for X Premium).",
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },
     async () =>
       ok(listAccounts(userId).map((a) => ({
         account_id: a.id, platform: a.platform, name: a.name, handle: a.handle,
-        char_limit: platforms[a.platform].limit, requires_image: !!platforms[a.platform].requiresMedia,
+        char_limit: charLimit(a), requires_image: !!platforms[a.platform].requiresMedia,
+        ...(a.platform === "x" ? { x_premium: a.premium } : {}),
       })))
   );
 
@@ -176,12 +205,44 @@ function buildServer(user) {
     }
   );
 
+  server.registerTool(
+    "upload_image",
+    {
+      title: "Upload image",
+      description:
+        "Add a picture to the user's image library: PNG, JPEG, GIF or WebP, up to 8 MB. Use it for an image the " +
+        "user gave you in the chat or one you made. Returns the image's `url`; pass that as `media_url` to attach it to a post.",
+      inputSchema: {
+        filename: z.string().regex(/\.(png|jpe?g|gif|webp)$/i, "filename must end in .png, .jpg, .jpeg, .gif or .webp")
+          .describe("File name, e.g. launch-banner.png"),
+        data_base64: z.string().describe("The image file's bytes, base64-encoded"),
+        name: z.string().optional().describe("Name to show in the library. Defaults to the file name."),
+      },
+    },
+    async ({ filename, data_base64, name }) => {
+      try {
+        const usage = uploadLimiter.check(userId);
+        if (!usage.allowed) return fail("Too many uploads this hour. Try again later.");
+        const bytes = decodeBase64(data_base64);
+        // The name is only a hint; what the bytes are decides the type.
+        const mime = sniffImageType(bytes);
+        if (!mime) return fail("That file is not a PNG, JPEG, GIF or WebP image.");
+        uploadLimiter.hit(userId);
+        const row = saveImage({ userId, bytes, mime, name: name?.trim() || filename, source: "upload" });
+        return ok({ message: "Added to the image library", ...describeImage(row) });
+      } catch (e) {
+        return fail(e.message);
+      }
+    }
+  );
+
   const postFields = {
     content: z.string().min(1).describe("Main post text, used for every account without a variant"),
     account_ids: z.array(z.string()).optional().describe("Account ids from list_accounts"),
     platforms: z.array(platformEnum).optional().describe("Post to every connected account on these platforms"),
-    variants: z.record(platformEnum, z.string()).optional()
-      .describe("Optional per-platform text, e.g. {\"x\": \"short version\"}"),
+    variants: z.partialRecord(platformEnum, z.string()).optional()
+      .describe("Optional per-platform text, only for the platforms that need it, e.g. {\"x\": \"short version\"}"),
+    thread: threadField.optional(),
     media_url: z.string().url().optional()
       .describe("URL of one image to attach (required for Instagram). Use the `url` of an image from list_images, or any public image URL."),
   };
@@ -200,16 +261,16 @@ function buildServer(user) {
         draft: z.boolean().optional().describe("Save as a draft instead of scheduling"),
       },
     },
-    async ({ content, account_ids, platforms: pf, variants, media_url, scheduled_at, draft }) => {
+    async ({ content, account_ids, platforms: pf, variants, thread, media_url, scheduled_at, draft }) => {
       try {
         const targets = resolveTargets(userId, account_ids, pf);
-        const problems = checkLimits(targets, content, variants, media_url);
+        const problems = checkLimits(targets, content, variants, media_url, thread);
         if (problems.length) return fail("Not scheduled. Fix these first:\n" + problems.join("\n"));
         if (!draft && !scheduled_at) return fail("Provide scheduled_at, or set draft=true.");
         const when = draft ? null : parseWhen(scheduled_at);
         if (when && when < Date.now() - 60_000) return fail("scheduled_at is in the past. Use publish_now to post immediately.");
         const post = savePost({
-          user_id: userId, content, media_url, scheduled_at: when, draft: !!draft, source: "claude",
+          user_id: userId, content, media_url, thread, scheduled_at: when, draft: !!draft, source: "claude",
           targets: targets.map((t) => ({ account_id: t.id, content_override: variants?.[t.platform] })),
         });
         return ok({ message: draft ? "Draft saved" : "Scheduled", post: summarizePost(post) });
@@ -229,7 +290,7 @@ function buildServer(user) {
         ...Object.fromEntries(Object.entries(postFields).map(([k, v]) => [k, v.optional()])),
       },
     },
-    async ({ post_id, content, account_ids, platforms: pf, variants, media_url }) => {
+    async ({ post_id, content, account_ids, platforms: pf, variants, thread, media_url }) => {
       try {
         let id = post_id;
         if (id) {
@@ -240,10 +301,10 @@ function buildServer(user) {
         } else {
           if (!content) return fail("Provide content or post_id.");
           const targets = resolveTargets(userId, account_ids, pf);
-          const problems = checkLimits(targets, content, variants, media_url);
+          const problems = checkLimits(targets, content, variants, media_url, thread);
           if (problems.length) return fail("Not published. Fix these first:\n" + problems.join("\n"));
           id = savePost({
-            user_id: userId, content, media_url, scheduled_at: Date.now(), source: "claude",
+            user_id: userId, content, media_url, thread, scheduled_at: Date.now(), source: "claude",
             targets: targets.map((t) => ({ account_id: t.id, content_override: variants?.[t.platform] })),
           }).id;
         }
@@ -259,34 +320,37 @@ function buildServer(user) {
     "update_post",
     {
       title: "Update post",
-      description: "Change the text, time, accounts or image of a draft, scheduled or failed post. Omitted fields keep their current value.",
+      description: "Change the text, X thread, time, accounts or image of a draft, scheduled or failed post. Omitted fields keep their current value.",
       inputSchema: {
         post_id: z.string(),
         content: z.string().optional(),
         scheduled_at: z.string().optional().describe("New ISO 8601 time with offset"),
         account_ids: z.array(z.string()).optional(),
         platforms: z.array(platformEnum).optional(),
-        variants: z.record(platformEnum, z.string()).optional(),
+        variants: z.partialRecord(platformEnum, z.string()).optional()
+          .describe("Per-platform text to set, only for the platforms you are changing"),
+        thread: threadField.optional().describe("New X thread (the posts after `content`). Pass [] to remove it."),
         media_url: z.string().url().nullable().optional().describe("New image URL, or null to remove it"),
         draft: z.boolean().optional().describe("true to unschedule into a draft"),
       },
     },
-    async ({ post_id, content, scheduled_at, account_ids, platforms: pf, variants, media_url, draft }) => {
+    async ({ post_id, content, scheduled_at, account_ids, platforms: pf, variants, thread, media_url, draft }) => {
       try {
         const p = getPost(userId, post_id);
         if (!p) return fail("Post not found");
         const targets = account_ids || pf
           ? resolveTargets(userId, account_ids, pf)
-          : p.targets.map((t) => ({ id: t.account_id, platform: t.platform }));
+          : resolveTargets(userId, p.targets.map((t) => t.account_id));
         const newContent = content ?? p.content;
+        const newThread = thread ?? p.thread;
         const newMedia = media_url === undefined ? p.media_url : media_url;
         const oldVariants = Object.fromEntries(p.targets.filter((t) => t.content_override).map((t) => [t.platform, t.content_override]));
         const newVariants = { ...oldVariants, ...variants };
-        const problems = checkLimits(targets, newContent, newVariants, newMedia);
+        const problems = checkLimits(targets, newContent, newVariants, newMedia, newThread);
         if (problems.length) return fail("Not updated. Fix these first:\n" + problems.join("\n"));
         const when = draft ? null : scheduled_at ? parseWhen(scheduled_at) : p.scheduled_at;
         const post = savePost({
-          user_id: userId, id: post_id, content: newContent, media_url: newMedia, scheduled_at: when,
+          user_id: userId, id: post_id, content: newContent, media_url: newMedia, thread: newThread, scheduled_at: when,
           draft: draft ?? p.status === "draft",
           targets: targets.map((t) => ({ account_id: t.id, content_override: newVariants[t.platform] })),
         });
@@ -321,6 +385,8 @@ function buildServer(user) {
 const badKeyLimiter = createLimiter({ windowMs: 15 * 60_000, max: 10 });
 // Valid traffic: 120 requests per minute per user.
 const userLimiter = createLimiter({ windowMs: 60_000, max: 120 });
+// upload_image: 120 pictures an hour per user, the same as uploads from the dashboard.
+const uploadLimiter = createLimiter({ windowMs: 60 * 60_000, max: 120 });
 
 /** Stateless Streamable HTTP endpoint: a fresh server + transport per request. */
 export async function handleMcp(req, res) {

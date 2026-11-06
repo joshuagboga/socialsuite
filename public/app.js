@@ -44,11 +44,14 @@ const toLocalInput = (ms) => {
   return d.toISOString().slice(0, 16);
 };
 
-// Character counting the way each platform does it.
+// Character counting the way each platform does it. X uses the same counter as the server
+// (src/xcount.js, built by `npm run build:js`); until it loads, a close guess is used.
 const segmenter = new Intl.Segmenter();
-function charCount(platform, text) {
+let xLength = null;
+const xCounterReady = import("./vendor/xcount.js").then((m) => { xLength = m.xLength; }).catch(() => {});
+function charCount(platform, text, limit) {
   if (platform === "bluesky") return [...segmenter.segment(text)].length;
-  if (platform === "x") return [...text.replace(/https?:\/\/\S+/g, "x".repeat(23))].length;
+  if (platform === "x") return xLength ? xLength(text, limit) : [...text.replace(/https?:\/\/\S+/g, "x".repeat(23))].length;
   return [...text].length;
 }
 
@@ -57,6 +60,8 @@ function charCount(platform, text) {
 const state = { platforms: [], accounts: [], settings: null };
 const platformInfo = (id) => state.platforms.find((p) => p.id === id) || { label: id, limit: Infinity };
 const platformLabel = (id) => platformInfo(id).label;
+// X Premium accounts can post up to premiumLimit characters.
+const accountLimit = (a) => (a.premium && platformInfo(a.platform).premiumLimit) || platformInfo(a.platform).limit;
 
 async function loadBase() {
   [state.platforms, state.accounts, state.settings] = await Promise.all([
@@ -178,6 +183,7 @@ async function renderCompose(view, postId, params) {
     media_url: editing?.media_url ?? "",
     selected: new Set(editing ? editing.targets.map((t) => t.account_id) : state.accounts.map((a) => a.id).slice(0, 1)),
     variants: {},
+    thread: [...(editing?.thread ?? [])], // X posts after the main text, each a reply to the one before
     when: editing?.scheduled_at
       ? toLocalInput(editing.scheduled_at)
       : params.get("date")
@@ -187,6 +193,8 @@ async function renderCompose(view, postId, params) {
   for (const t of editing?.targets ?? []) if (t.content_override) draft.variants[t.platform] = t.content_override;
 
   const selectedPlatforms = () => [...new Set(state.accounts.filter((a) => draft.selected.has(a.id)).map((a) => a.platform))];
+  // The text has to fit every selected account on the platform, so use the smallest limit.
+  const limitFor = (p) => Math.min(...state.accounts.filter((a) => draft.selected.has(a.id) && a.platform === p).map(accountLimit));
 
   view.innerHTML = `
     <div class="page-head">
@@ -214,6 +222,8 @@ async function renderCompose(view, postId, params) {
 
           <div class="stack" id="variants"></div>
           <div><button class="link small" id="add-variant">+ Customize text for a platform</button></div>
+
+          <div class="stack" id="thread"></div>
 
           <div>
             <strong>Image</strong> <span class="muted small">(optional; required for Instagram)</span>
@@ -263,11 +273,44 @@ async function renderCompose(view, postId, params) {
     $("#counters").innerHTML = plats.length
       ? plats.map((p) => {
           const text = draft.variants[p] ?? content.value;
-          const n = charCount(p, text), lim = platformInfo(p).limit;
+          const lim = limitFor(p), n = charCount(p, text, lim);
           const src = draft.variants[p] != null ? " (custom)" : "";
           return `<span class="${n > lim ? "over" : ""}">${esc(platformLabel(p))}${src}: ${n}/${lim}</span>`;
         }).join("")
       : `<span class="error">No accounts selected</span>`;
+    $$("#thread [data-i]").forEach((el) => {
+      const lim = selectedPlatforms().includes("x") ? limitFor("x") : platformInfo("x").limit;
+      const n = charCount("x", draft.thread[el.dataset.i], lim);
+      $("[data-count]", el).textContent = `${n}/${lim}`;
+      $("[data-count]", el).classList.toggle("error", n > lim);
+    });
+  }
+
+  // X threads: the main text (or the X version) is post 1; these follow as replies.
+  function renderThread() {
+    const box = $("#thread");
+    const onX = selectedPlatforms().includes("x");
+    if (!onX && !draft.thread.length) { box.innerHTML = ""; return; }
+    box.innerHTML = `
+      ${draft.thread.length ? `<div class="variant-head">${badge("x")} X thread
+        <span class="muted small">${onX ? "Posted as replies after the main text" : "Only posted when an X account is selected"}</span></div>` : ""}
+      ${draft.thread.map((text, i) => `
+        <div class="variant" data-i="${i}">
+          <div class="variant-head">Post ${i + 2}<span class="spacer"></span>
+            <span class="small" data-count></span><button class="link small" data-remove>Remove</button></div>
+          <textarea>${esc(text)}</textarea>
+        </div>`).join("")}
+      ${onX ? `<div><button class="link small" id="add-thread">+ Add a post to the X thread</button></div>` : ""}`;
+    $$("[data-i]", box).forEach((el) => {
+      const i = Number(el.dataset.i);
+      $("textarea", el).addEventListener("input", (e) => { draft.thread[i] = e.target.value; renderCounters(); });
+      $("[data-remove]", el).addEventListener("click", () => { draft.thread.splice(i, 1); renderThread(); renderCounters(); });
+    });
+    $("#add-thread")?.addEventListener("click", () => {
+      draft.thread.push("");
+      renderThread(); renderCounters();
+      $$("#thread textarea").at(-1).focus();
+    });
   }
 
   function renderVariants() {
@@ -316,12 +359,12 @@ async function renderCompose(view, postId, params) {
     const id = chip.dataset.id;
     draft.selected.has(id) ? draft.selected.delete(id) : draft.selected.add(id);
     chip.classList.toggle("on", draft.selected.has(id));
-    renderCounters();
+    renderThread(); renderCounters();
   }));
   $("#sel-all").onclick = () => {
     state.accounts.forEach((a) => draft.selected.add(a.id));
     $$(".acct-chip").forEach((c) => c.classList.add("on"));
-    renderCounters();
+    renderThread(); renderCounters();
   };
   content.addEventListener("input", renderCounters);
 
@@ -352,7 +395,7 @@ async function renderCompose(view, postId, params) {
       });
       if (!variants.length) throw new Error("Claude returned no drafts");
       // Longest-limit platform's version becomes the main text; others become custom versions if they differ.
-      const sorted = [...variants].sort((a, b) => platformInfo(b.platform).limit - platformInfo(a.platform).limit);
+      const sorted = [...variants].sort((a, b) => limitFor(b.platform) - limitFor(a.platform));
       content.value = sorted[0].text;
       draft.variants = {};
       for (const v of sorted.slice(1)) if (v.text !== content.value) draft.variants[v.platform] = v.text;
@@ -378,10 +421,15 @@ async function renderCompose(view, postId, params) {
     if (!content.value.trim()) problems.push("Post text is empty.");
     if (kind !== "draft") {
       for (const p of plats) {
-        const n = charCount(p, draft.variants[p] ?? content.value), lim = platformInfo(p).limit;
+        const lim = limitFor(p), n = charCount(p, draft.variants[p] ?? content.value, lim);
         if (n > lim) problems.push(`${platformLabel(p)} text is ${n - lim} characters too long.`);
         if (platformInfo(p).requiresMedia && !draft.media_url) problems.push(`${platformLabel(p)} needs an image.`);
       }
+      if (plats.includes("x")) draft.thread.forEach((text, i) => {
+        const lim = limitFor("x"), n = charCount("x", text, lim);
+        if (!text.trim()) problems.push(`X thread post ${i + 2} is empty.`);
+        else if (n > lim) problems.push(`X thread post ${i + 2} is ${n - lim} characters too long.`);
+      });
     }
     const whenMs = new Date($("#when").value).getTime();
     if (kind === "schedule" && (!$("#when").value || Number.isNaN(whenMs))) problems.push("Pick a date and time.");
@@ -390,6 +438,8 @@ async function renderCompose(view, postId, params) {
     return {
       content: content.value,
       media_url: draft.media_url || null,
+      // Kept while X is not selected only for drafts, so unticking X for a moment does not lose it.
+      thread: plats.includes("x") || kind === "draft" ? draft.thread.filter((t) => t.trim()) : [],
       draft: kind === "draft",
       scheduled_at: kind === "draft" ? ($("#when").value ? new Date(whenMs).toISOString() : null)
         : new Date(kind === "now" ? Date.now() : whenMs).toISOString(),
@@ -440,7 +490,8 @@ async function renderCompose(view, postId, params) {
     $("#form-error").textContent = `This post is ${editing.status} and can no longer be edited.`;
   }
 
-  renderVariants(); renderMedia(); renderCounters();
+  renderVariants(); renderThread(); renderMedia(); renderCounters();
+  xCounterReady.then(renderCounters);
 }
 
 // ---------------------------------------------------------------- posts list
@@ -489,6 +540,7 @@ async function renderPosts(view, tab = "scheduled") {
         </div>
         <div>
           <div class="post-text">${esc(p.content)}</div>
+          ${p.thread?.length ? `<div class="muted small">🧵 X thread: ${p.thread.length + 1} posts</div>` : ""}
           ${p.media_url ? `<div class="muted small">🖼 image attached</div>` : ""}
           ${targetChips(p)}
           ${errors.map((t) => `<div class="error small">${esc(platformLabel(t.platform))}: ${esc(t.error)}</div>`).join("")}
@@ -592,6 +644,8 @@ function showPostModal(p) {
     <div class="row" style="margin-bottom:10px"><strong>${fmtDateTime(p.scheduled_at)}</strong>
       <span class="status s-${p.status}">${p.status}</span></div>
     <div style="white-space:pre-wrap;word-break:break-word">${esc(p.content)}</div>
+    ${(p.thread ?? []).map((t, i) => `<div class="muted small" style="margin-top:10px">${badge("x")} Thread post ${i + 2}</div>
+      <div style="white-space:pre-wrap;word-break:break-word">${esc(t)}</div>`).join("")}
     ${p.media_url ? `<img src="${esc(p.media_url)}" alt="" style="max-width:100%;border-radius:8px;margin-top:10px" />` : ""}
     ${targetChips(p)}
     ${p.targets.filter((t) => t.error).map((t) => `<div class="error small">${esc(platformLabel(t.platform))}: ${esc(t.error)}</div>`).join("")}
@@ -843,6 +897,8 @@ async function renderAccounts(view, _arg, params) {
             <div class="small muted">${badge(a.platform)} ${esc(platformLabel(a.platform))}
               ${expiring ? ` · <span class="error">token expires ${new Date(a.token_expires_at).toLocaleDateString()} — reconnect</span>` : ""}</div>
           </div>
+          ${a.platform === "x" ? `<label class="btn sm" style="flex-direction:row;gap:6px" title="X Premium accounts can post up to ${platformInfo("x").premiumLimit.toLocaleString()} characters">
+            <input type="checkbox" data-premium="${a.id}" ${a.premium ? "checked" : ""} /> Premium</label>` : ""}
           ${platformInfo(a.platform).kind === "oauth" ? `<a class="btn sm" href="/auth/${a.platform}/start">Reconnect</a>` : ""}
           <button class="btn sm danger" data-del="${a.id}">Disconnect</button>
         </div>`;
@@ -867,6 +923,22 @@ async function renderAccounts(view, _arg, params) {
     await api(`/api/accounts/${b.dataset.del}`, { method: "DELETE" });
     toast("Disconnected");
     renderAccounts(view, null, new URLSearchParams());
+  });
+
+  $$("[data-premium]").forEach((box) => box.onchange = async () => {
+    box.disabled = true;
+    try {
+      await api(`/api/accounts/${box.dataset.premium}`, { method: "PATCH", body: { premium: box.checked } });
+      toast(box.checked
+        ? `X Premium on: posts can be up to ${platformInfo("x").premiumLimit.toLocaleString()} characters`
+        : `X Premium off: posts are limited to ${platformInfo("x").limit} characters`);
+      await loadBase();
+    } catch (err) {
+      box.checked = !box.checked;
+      toast(err.message, true);
+    } finally {
+      box.disabled = false;
+    }
   });
 
   $$("[data-connect]").forEach((b) => b.onclick = () => {
@@ -986,7 +1058,8 @@ async function renderClaude(view) {
           ${[
             ["list_accounts", "See connected accounts and character limits"],
             ["list_images / view_image", "Find a picture in your image library and attach it"],
-            ["schedule_post", "Schedule or draft a post, with per-platform versions"],
+            ["upload_image", "Add a picture to your image library, e.g. one you shared in the chat"],
+            ["schedule_post", "Schedule or draft a post, with per-platform versions and X threads"],
             ["publish_now", "Post immediately, or push a scheduled post out now"],
             ["list_posts / get_post", "Review your queue, results and errors"],
             ["update_post", "Change text, time, accounts or image"],

@@ -1,7 +1,7 @@
 // The image library and the connector tools that let Claude attach images.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { startServer, startFakeMastodon, client, connectMastodon, inAnHour } from "./helpers.js";
+import { startServer, startFakeMastodon, client, connectMastodon, inAnHour, mcpCall, mcpData } from "./helpers.js";
 
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
 const JPEG_THUMB = Buffer.from("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=", "base64");
@@ -26,15 +26,7 @@ async function upload(c, { bytes = PNG, type = "image/png", name, source, path =
   return { status: res.status, data: await res.json().catch(() => ({})) };
 }
 
-async function mcp(key, name, args = {}) {
-  const res = await fetch(`${app.url}/mcp`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", Authorization: `Bearer ${key}` },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
-  });
-  const text = await res.text();
-  return JSON.parse(text.includes("data: ") ? text.split("data: ")[1] : text).result;
-}
+const mcp = (key, name, args) => mcpCall(app.url, key, name, args);
 
 test("upload, list, rename and delete an image", async () => {
   const c = await signedIn("img-owner@example.com");
@@ -161,4 +153,79 @@ test("a post with a library image sends the image to the platform", async () => 
 
   // Once published, the post no longer holds the image in the library.
   assert.equal((await c.del(`/api/images/${img.id}`)).status, 200);
+});
+
+// ---------------------------------------------------------------- upload_image (Claude adds a picture)
+
+test("Claude can upload a picture and it shows up in the library", async () => {
+  const c = await signedIn("img-upload@example.com");
+  const key = (await c.get("/api/settings")).data.mcp.key;
+
+  const result = await mcp(key, "upload_image", { filename: "chart.png", data_base64: PNG.toString("base64"), name: "Q3 chart" });
+  assert.equal(result.isError, undefined, result.content[0].text);
+  const up = mcpData(result);
+  assert.equal(up.name, "Q3 chart");
+  assert.match(up.image_id, /^[\w-]{36}$/);
+  assert.match(up.url, /\/uploads\/[\w-]+\.png$/);
+  assert.deepEqual(Buffer.from(await (await fetch(up.url)).arrayBuffer()), PNG, "served exactly as sent");
+
+  const listed = mcpData(await mcp(key, "list_images"));
+  assert.deepEqual(listed.map((i) => [i.image_id, i.name, i.url, i.type]), [[up.image_id, "Q3 chart", up.url, "image/png"]]);
+  assert.equal((await c.get("/api/images")).data[0].id, up.image_id, "the dashboard sees it too");
+
+  // The name defaults to the file name, and a data: URL prefix is accepted.
+  const named = mcpData(await mcp(key, "upload_image", { filename: "logo.PNG", data_base64: "data:image/png;base64," + PNG.toString("base64") }));
+  assert.equal(named.name, "logo.PNG");
+});
+
+test("upload_image goes by the file's bytes, not its name", async () => {
+  const c = await signedIn("img-sniff@example.com");
+  const key = (await c.get("/api/settings")).data.mcp.key;
+
+  const fake = await mcp(key, "upload_image", { filename: "photo.png", data_base64: Buffer.from("#!/bin/sh\necho not a picture\n").toString("base64") });
+  assert.equal(fake.isError, true);
+  assert.match(fake.content[0].text, /not a PNG, JPEG, GIF or WebP/);
+
+  // A real JPEG named .png is stored as the JPEG it is.
+  const jpeg = mcpData(await mcp(key, "upload_image", { filename: "wrong-name.png", data_base64: JPEG_THUMB.toString("base64") }));
+  assert.equal(jpeg.type, "image/jpeg");
+  assert.match(jpeg.url, /\.jpg$/);
+
+  const badName = await mcp(key, "upload_image", { filename: "notes.txt", data_base64: PNG.toString("base64") });
+  assert.equal(badName.isError, true);
+  assert.match(badName.content[0].text, /must end in \.png/);
+  for (const data_base64 of ["", "   ", "not base64 at all!"]) {
+    const r = await mcp(key, "upload_image", { filename: "x.png", data_base64 });
+    assert.equal(r.isError, true);
+    assert.match(r.content[0].text, /data_base64 is (empty|not valid base64)/);
+  }
+  assert.equal(mcpData(await mcp(key, "list_images")).length, 1, "only the real JPEG was saved");
+});
+
+test("upload_image takes pictures up to 8 MB and refuses bigger ones", async () => {
+  const c = await signedIn("img-big@example.com");
+  const key = (await c.get("/api/settings")).data.mcp.key;
+  const sized = (n) => Buffer.concat([PNG, Buffer.alloc(n - PNG.length, 7)]);
+
+  // About 11 MB of JSON: the connector's request size limit has to allow it.
+  const big = await mcp(key, "upload_image", { filename: "big.png", data_base64: sized(8 * 1024 * 1024).toString("base64") });
+  assert.equal(big.isError, undefined, big.content[0].text);
+  assert.equal(mcpData(big).size_kb, 8192);
+
+  const tooBig = await mcp(key, "upload_image", { filename: "huge.png", data_base64: sized(8 * 1024 * 1024 + 1).toString("base64") });
+  assert.equal(tooBig.isError, true);
+  assert.match(tooBig.content[0].text, /over 8 MB/);
+});
+
+test("a picture Claude uploads is private to that user", async () => {
+  const alice = await signedIn("img-up-alice@example.com"), bob = await signedIn("img-up-bob@example.com");
+  const aliceKey = (await alice.get("/api/settings")).data.mcp.key;
+  const bobKey = (await bob.get("/api/settings")).data.mcp.key;
+  const img = mcpData(await mcp(aliceKey, "upload_image", { filename: "alice-secret.png", data_base64: PNG.toString("base64") }));
+
+  assert.deepEqual(mcpData(await mcp(bobKey, "list_images")), []);
+  assert.equal((await mcp(bobKey, "view_image", { image_id: img.image_id })).isError, true);
+  assert.deepEqual((await bob.get("/api/images")).data, []);
+  assert.equal((await bob.del(`/api/images/${img.image_id}`)).status, 404);
+  assert.equal(mcpData(await mcp(aliceKey, "list_images")).length, 1);
 });

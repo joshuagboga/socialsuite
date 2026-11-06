@@ -1,5 +1,5 @@
-// Test helpers: start the real server on a temp data folder, plus a tiny fake Mastodon
-// instance so posts can be "published" without touching a real social network.
+// Test helpers: start the real server on a temp data folder, plus tiny fake Mastodon and X
+// servers so posts can be "published" without touching a real social network.
 
 import { spawn } from "node:child_process";
 import http from "node:http";
@@ -77,6 +77,7 @@ export function client(baseUrl) {
     get: (p, h) => call("GET", p, undefined, h),
     post: (p, b = {}, h) => call("POST", p, b, h),
     put: (p, b, h) => call("PUT", p, b, h),
+    patch: (p, b, h) => call("PATCH", p, b, h),
     del: (p, h) => call("DELETE", p, undefined, h),
     signUp(email, password = "correct horse battery") { return call("POST", "/api/signup", { email, password, name: email.split("@")[0] }); },
     logIn(email, password = "correct horse battery") { return call("POST", "/api/login", { email, password }); },
@@ -129,3 +130,68 @@ export async function connectMastodon(c, fake, token) {
 }
 
 export const inAnHour = () => new Date(Date.now() + 3600_000).toISOString();
+
+/** Call one connector tool the way Claude does. Returns the MCP result ({ content, isError? }). */
+export async function mcpCall(baseUrl, key, name, args = {}) {
+  const res = await fetch(`${baseUrl}/mcp`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", Authorization: `Bearer ${key}` },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
+  });
+  const text = await res.text();
+  const payload = JSON.parse(text.includes("data: ") ? text.split("data: ")[1] : text);
+  if (!payload.result) throw new Error(`MCP ${name} answered HTTP ${res.status}: ${text.slice(0, 300)}`);
+  return payload.result;
+}
+
+/** The JSON a successful tool call returned. */
+export const mcpData = (result) => JSON.parse(result.content.at(-1).text);
+
+/**
+ * Fake X API (start the server with X_API_URL set to its url and any X_CLIENT_ID).
+ * `tweets` holds every POST /2/tweets body. `behavior.fail(body, n)` returning true makes
+ * the nth tweet request fail with HTTP 503.
+ */
+export async function startFakeX() {
+  const tweets = [];
+  const media = [];
+  const behavior = { fail: () => false };
+  const server = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const raw = Buffer.concat(chunks);
+    const json = (code, data) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); };
+    if (req.url === "/2/oauth2/token" && req.method === "POST") {
+      return json(200, { access_token: "x-access", refresh_token: "x-refresh", expires_in: 7200 });
+    }
+    if (req.url.startsWith("/2/users/me")) {
+      return json(200, { data: { id: "x-user-1", name: "X Tester", username: "xtester", profile_image_url: null } });
+    }
+    if (req.url === "/2/media/upload" && req.method === "POST") {
+      media.push({ bytes: raw.length, raw });
+      return json(200, { data: { id: `xmedia-${media.length}` } });
+    }
+    if (req.url === "/2/tweets" && req.method === "POST") {
+      const body = JSON.parse(raw.toString());
+      tweets.push(body);
+      if (behavior.fail(body, tweets.length)) return json(503, { detail: "Service Unavailable" });
+      return json(201, { data: { id: String(1000 + tweets.length), text: body.text } });
+    }
+    json(404, { detail: "not found" });
+  });
+  await new Promise((r) => server.listen(0, r));
+  const url = `http://localhost:${server.address().port}`;
+  return {
+    url, tweets, media, behavior,
+    close: () => { server.closeAllConnections(); return new Promise((r) => server.close(r)); },
+  };
+}
+
+/** Connect an X account through the real OAuth routes, answered by the fake X. Returns its id. */
+export async function connectX(c) {
+  const start = await c.get("/auth/x/start");
+  const state = new URL(start.headers.get("location")).searchParams.get("state");
+  const back = await c.get(`/auth/x/callback?code=fake-code&state=${state}`);
+  if (!back.headers.get("location")?.includes("connected=1")) throw new Error("X connect failed: " + back.headers.get("location"));
+  return (await c.get("/api/accounts")).data.find((a) => a.platform === "x").id;
+}
