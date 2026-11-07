@@ -8,6 +8,7 @@
 // `idempotencyKey` is stable for a given post + account + text; pass it on where the platform supports one.
 // X also takes { thread, threadIds, onThreadProgress } to post a thread (see x.publish).
 
+import { createHash } from "node:crypto";
 import { xLength } from "./xcount.js";
 
 const env = (k) => process.env[k] || "";
@@ -527,7 +528,153 @@ const mastodon = {
   },
 };
 
-export const platforms = { x, linkedin, facebook, instagram, threads, bluesky, mastodon };
+// ---------------------------------------------------------------- Binance Square
+// Uses Binance Square's official OpenAPI, the same calls as Binance's own square-post skill
+// (github.com/binance/binance-skills-hub, skills/binance/square-post/scripts/lib.mjs).
+// Auth is one key from the Square Creator Center, sent as X-Square-OpenAPI-Key. The key can only
+// publish to Square: it cannot trade, withdraw or read the Binance account.
+// Image post: /image/presignedUrl -> PUT the bytes -> poll /image/imageStatus -> /content/add.
+
+// BINANCE_SQUARE_API_URL points the calls somewhere else (a fake Square in the tests).
+const SQUARE_API = () => (env("BINANCE_SQUARE_API_URL") || "https://www.binance.com/bapi/composite").replace(/\/$/, "");
+const SQUARE_POLL_MS = () => Number(env("BINANCE_SQUARE_POLL_MS")) || 3000;
+const SQUARE_POLL_TRIES = 10;
+
+// Codes where trying again cannot help (bad key, banned, content refused), so the post fails
+// at once with the reason instead of being retried.
+const SQUARE_FINAL_CODES = {
+  "10005": "Binance identity verification (KYC) is required to post",
+  "20002": "Binance Square refused the text: it contains words it treats as sensitive",
+  "20013": "The post is too long for Binance Square",
+  "20020": "Binance Square does not accept empty posts",
+  "20022": "Binance Square refused the text: it contains words it treats as sensitive",
+  "20041": "Binance Square flagged a link in the post as a possible security risk",
+  "30004": "Binance could not find the user for this key",
+  "30008": "This Binance Square account is restricted from posting",
+  "220003": "The Binance Square API key was not found. Create a new one in the Creator Center and reconnect",
+  "220004": "The Binance Square API key has expired. Create a new one in the Creator Center and reconnect",
+  "220009": "Binance Square's daily limit of 100 API posts is used up; try again tomorrow",
+  "220010": "Binance Square does not support this content type",
+  "220011": "Binance Square does not accept empty posts",
+  "220014": "Binance Square's daily upload limit (400) is used up; try again tomorrow",
+  "2000001": "This Binance account is permanently blocked from posting",
+  "2000002": "This device is permanently blocked from posting on Binance Square",
+};
+
+class SquareError extends PlatformError {
+  constructor(message, { code = null, noRetry = false } = {}) {
+    super(message);
+    this.code = code;
+    this.noRetry = noRetry; // the scheduler marks the post failed at once instead of retrying
+  }
+}
+
+async function squareApi(version, endpoint, apiKey, body) {
+  const url = `${SQUARE_API()}/${version}/public/pgc/openApi${endpoint}`;
+  const publishing = endpoint === "/content/add";
+  let res, raw;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: { "X-Square-OpenAPI-Key": apiKey, "Content-Type": "application/json", clienttype: "binanceSkill" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+    });
+    raw = await res.text();
+  } catch (e) {
+    // A publish request that got no answer may still have gone live, so it is not sent again.
+    if (publishing && e.name === "TimeoutError") {
+      throw new SquareError("Binance Square did not answer in time. The post may be live: check your Square profile, and press Retry only if it is not there.", { noRetry: true });
+    }
+    throw new SquareError(`Could not reach Binance Square: ${e.cause?.code || e.message}`);
+  }
+  // Binance's own skill treats a 504 from /content/add as published without an id.
+  if (publishing && res.status === 504) return { id: null, shareLink: null };
+  let json;
+  try { json = JSON.parse(raw); } catch {
+    throw new SquareError(`Binance Square answered ${res.status} ${res.statusText || ""}`.trim());
+  }
+  if (json.code !== "000000") {
+    const code = String(json.code);
+    const known = SQUARE_FINAL_CODES[code];
+    throw new SquareError(`${known || json.message || "Binance Square error"} [${code}]`, { code, noRetry: !!known });
+  }
+  return json.data ?? {};
+}
+
+const SQUARE_EXT = { "image/jpeg": "jpg", "image/png": "png", "image/gif": "gif", "image/webp": "webp" };
+
+async function squareUploadImage(apiKey, media) {
+  const ext = SQUARE_EXT[media.mime];
+  if (!ext) throw new SquareError(`Binance Square takes JPG, PNG, GIF or WebP images, not ${media.mime}`, { noRetry: true });
+  const { presignedUrl, fileTicket } = await squareApi("v2", "/image/presignedUrl", apiKey, { imageName: `socialsuite.${ext}` });
+  let put;
+  try {
+    put = await fetch(presignedUrl, {
+      method: "PUT", headers: { "Content-Type": media.mime }, body: media.bytes, signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+    });
+  } catch (e) {
+    throw new SquareError(`Image upload to Binance Square failed: ${e.cause?.code || e.message}`);
+  }
+  if (!put.ok) throw new SquareError(`Image upload to Binance Square failed: ${put.status}`);
+  for (let i = 0; i < SQUARE_POLL_TRIES; i++) {
+    const s = await squareApi("v2", "/image/imageStatus", apiKey, { fileTicket });
+    if (s.status === 1) return s.imageUrl;
+    if (s.status === 2) throw new SquareError(`Binance Square could not process the image: ${s.failedReason || "unknown reason"}`, { noRetry: true });
+    await sleep(SQUARE_POLL_MS());
+  }
+  throw new SquareError("Binance Square took too long to process the image");
+}
+
+const binance_square = {
+  label: "Binance Square",
+  limit: 4000,
+  kind: "credentials",
+  configured: () => true,
+  fields: [
+    { name: "api_key", label: "Square OpenAPI key", type: "password",
+      help: "binance.com/square/creator-center/home → Create API Key. It can only post to Square: it cannot trade or withdraw." },
+    { name: "name", label: "Your Square name (optional)", placeholder: "Big Josh Codes",
+      help: "Binance does not share your profile with apps, so this is just the name shown here." },
+  ],
+  async connect({ api_key, name }) {
+    const key = String(api_key || "").trim();
+    if (!key) throw new Error("Square OpenAPI key is required");
+    // There is no "who am I" call, so check the key with a publish request that has no text:
+    // Binance refuses an empty post, but it says which problem it found first. An unknown or
+    // expired key is reported as such; any other answer means the key itself was accepted.
+    try {
+      await squareApi("v1", "/content/add", key, { contentType: 1, bodyTextOnly: "" });
+    } catch (e) {
+      if (e.code === "220003" || e.code === "220004" || e.code === "10005") throw e;
+      if (!e.code) throw e; // Binance could not be reached: do not save a key we could not check
+    }
+    const masked = key.length > 9 ? `${key.slice(0, 5)}…${key.slice(-4)}` : "key …" + key.slice(-2);
+    return [{
+      platform: "binance_square",
+      // The key is the only identity Binance gives an app, so a hash of it tells accounts apart.
+      external_id: createHash("sha256").update(key).digest("hex").slice(0, 24),
+      name: String(name || "").trim() || "Binance Square",
+      handle: masked,
+      avatar_url: null,
+      credentials: { api_key: key },
+    }];
+  },
+  refresh: async () => null,
+  async publish(account, { text, media }) {
+    const { api_key } = account.credentials;
+    const body = { contentType: 1, bodyTextOnly: text };
+    if (media) body.imageList = [await squareUploadImage(api_key, media)];
+    const data = await squareApi("v1", "/content/add", api_key, body);
+    const id = data.id ? String(data.id) : null;
+    return {
+      remote_id: id,
+      remote_url: data.shareLink || (id ? `https://www.binance.com/square/post/${id}` : null),
+    };
+  },
+};
+
+export const platforms = { x, linkedin, facebook, instagram, threads, bluesky, mastodon, binance_square };
 export { PlatformError };
 
 /** The character limit for one account: X Premium accounts get the long-post limit. */

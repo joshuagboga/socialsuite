@@ -33,7 +33,7 @@ function closeModal() { $("#modal").classList.add("hidden"); }
 $("#modal").addEventListener("click", (e) => { if (e.target.id === "modal") closeModal(); });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
 
-const P_LETTER = { x: "𝕏", linkedin: "in", facebook: "f", instagram: "IG", threads: "@", bluesky: "🦋", mastodon: "M" };
+const P_LETTER = { x: "𝕏", linkedin: "in", facebook: "f", instagram: "IG", threads: "@", bluesky: "🦋", mastodon: "M", binance_square: "B" };
 const badge = (platform) => `<span class="pbadge p-${platform}" title="${esc(platformLabel(platform))}">${P_LETTER[platform] || "?"}</span>`;
 
 const fmtDateTime = (ms) => new Date(ms).toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
@@ -911,7 +911,7 @@ async function renderAccounts(view, _arg, params) {
           ${badge(p.id)}
           <div style="flex:1">
             <strong>${esc(p.id === "facebook" ? "Facebook + Instagram" : p.label)}</strong>
-            <div class="small muted">${p.id === "facebook" ? "Pages and linked Instagram business accounts" : p.kind === "oauth" ? "Sign in with " + esc(p.label) : "App password / token"}</div>
+            <div class="small muted">${p.id === "facebook" ? "Pages and linked Instagram business accounts" : p.kind === "oauth" ? "Sign in with " + esc(p.label) : p.id === "binance_square" ? "Square OpenAPI key (post only)" : "App password / token"}</div>
             ${p.kind === "oauth" && !p.configured ? `<div class="small error">Needs app keys in .env</div>` : ""}
           </div>
           <button class="btn sm" data-connect="${p.id}">Connect</button>

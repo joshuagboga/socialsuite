@@ -112,8 +112,9 @@ export async function publishPost(postId) {
       });
       log(`published to ${account.platform}`);
     } catch (err) {
-      // The platform answered with an error (or we never reached it), so retrying is safe.
-      const final = attempts >= MAX_ATTEMPTS;
+      // The platform answered with an error (or we never reached it), so retrying is safe,
+      // unless the adapter says another try cannot help or might post twice (err.noRetry).
+      const final = attempts >= MAX_ATTEMPTS || err.noRetry === true;
       updateTarget(postId, target.account_id, {
         status: final ? "failed" : "pending", attempts, error: String(err.message || err),
       });

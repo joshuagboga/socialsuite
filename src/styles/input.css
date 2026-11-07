@@ -121,6 +121,7 @@
   .p-threads { @apply bg-neutral-800 dark:bg-neutral-600; }
   .p-bluesky { @apply bg-[#1185fe]; }
   .p-mastodon { @apply bg-[#6364ff]; }
+  .p-binance_square { @apply bg-[#f0b90b] text-[#181a20]; }
   .avatar { @apply size-[34px] shrink-0 rounded-full bg-surface-2 object-cover; }
 
   /* ---------- login ---------- */

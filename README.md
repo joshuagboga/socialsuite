@@ -3,7 +3,7 @@
 A self-hosted, multi-user social media scheduler with a built-in Claude connector.
 
 - **Accounts** for each person: sign up with an email and password, and see only your own connected profiles and posts.
-- **Connect** X, LinkedIn, Facebook Pages, Instagram (business), Threads, Bluesky and Mastodon.
+- **Connect** X, LinkedIn, Facebook Pages, Instagram (business), Threads, Bluesky, Mastodon and Binance Square.
 - **Compose** one post for many accounts, with per-platform text, live character counts and an image.
 - **Image library**: upload pictures or pick them from Google Drive, name them, and attach them to posts.
 - **Schedule** on a calendar. A worker publishes due posts every 15 seconds and retries failures (3 attempts with backoff) without moving the time you picked.
@@ -76,6 +76,7 @@ Styles are written with Tailwind CSS v4 in `src/styles/input.css` and compiled b
 |---|---|---|
 | Bluesky | Accounts → Connect | Handle + an [app password](https://bsky.app/settings/app-passwords) |
 | Mastodon | Accounts → Connect | Instance URL + access token (Preferences → Development → New application; scopes `read:accounts write:statuses write:media`) |
+| Binance Square | Accounts → Connect | A Square OpenAPI key from [Creator Center](https://www.binance.com/square/creator-center/home) → Create API Key (needs KYC). It can only post to Square, never trade or withdraw. Text up to 4,000 characters, one image per post, 100 posts a day. `$BTC` cashtags and `#hashtags` pass through as written. |
 | X | OAuth | App at developer.x.com with OAuth 2.0 (Web App). Set `X_CLIENT_ID` / `X_CLIENT_SECRET`. Posting needs a paid API tier. |
 | LinkedIn | OAuth | App with *Sign In with LinkedIn using OpenID Connect* + *Share on LinkedIn*. Tokens last 60 days; reconnect when prompted. |
 | Facebook + Instagram | OAuth | Meta Business app with Facebook Login for Business and the `pages_show_list`, `pages_manage_posts`, `pages_read_engagement` and `business_management` permissions. One login connects every Page you admin. To also connect each Page's linked Instagram business account, add `instagram_basic` and `instagram_content_publish` to the app and set `META_INSTAGRAM=true`; Meta refuses the login ("Invalid Scopes") if a permission is requested that the app does not have. |
